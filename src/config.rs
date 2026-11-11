@@ -175,6 +175,8 @@ pub struct Config {
     pub theme: String,
     /// Language shown for comparison in the editor ("" for none).
     pub reference_lang: String,
+    /// The translation settings panel is collapsed.
+    pub hide_settings: bool,
 }
 
 impl Default for Config {
@@ -190,6 +192,7 @@ impl Default for Config {
             last_project: String::new(),
             theme: "light".into(),
             reference_lang: String::new(),
+            hide_settings: false,
         }
     }
 }

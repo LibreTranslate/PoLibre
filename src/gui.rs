@@ -58,7 +58,7 @@ pub fn run(path: Option<String>) -> Result<(), String> {
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PoLibre")
+            .with_title("PoLibre | by LibreTranslate")
             .with_inner_size(size)
             .with_min_inner_size(MIN_SIZE)
             .with_drag_and_drop(true)
@@ -1270,11 +1270,23 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 self.theme_button(ui);
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    self.settings_toggle(ui);
                     self.project_field(ui, running)
                 });
             });
         });
         self.project_summary(ui);
+    }
+
+    /// Collapses or restores the translation settings panel, and remembers it.
+    fn settings_toggle(&mut self, ui: &mut egui::Ui) {
+        let hidden = self.cfg.hide_settings;
+        let tip = if hidden { "Show the translation settings" } else { "Hide the translation settings" };
+        let b = egui::Button::new(RichText::new("⚙").size(17.0));
+        if ui.add(b).on_hover_text(tip).clicked() {
+            self.cfg.hide_settings = !hidden;
+            let _ = self.cfg.save();
+        }
     }
 
     /// Switches between the light and dark theme, and remembers the choice.
@@ -2561,7 +2573,7 @@ impl eframe::App for App {
             .resizable(true)
             .default_width(300.0)
             .width_range(260.0..=420.0)
-            .show(ctx, |ui| {
+            .show_animated(ctx, !self.cfg.hide_settings, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
