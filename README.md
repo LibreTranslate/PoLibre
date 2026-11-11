@@ -62,7 +62,9 @@ polibre translate . --no-config -p anthropic -m claude-opus-5-5 --report report.
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE). The bundled Inter font is © The Inter Project Authors,
+[AGPLv3](LICENSE). 
+
+The bundled Inter font is © The Inter Project Authors,
 under the [SIL Open Font License 1.1](assets/fonts/Inter-LICENSE.txt).
 
 ## Credits
