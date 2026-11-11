@@ -1,0 +1,20 @@
+# Build output
+/target
+
+# Local test projects (e.g. a WebODM checkout with its own git history)
+/test
+
+# Secrets
+*.key
+.env
+
+# Temporary files PoLibre writes while saving a .po file
+*.po.polibre.tmp
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- PoLibre icon: a .po file. Keep in sync with src/icon.rs (the window icon is drawn from the same shapes). -->
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="#005FB8"/>
+  <!-- page with a folded corner -->
+  <path d="M74 40 H160 L196 76 V202 Q196 216 182 216 H74 Q60 216 60 202 V54 Q60 40 74 40 Z" fill="#FFFFFF"/>
+  <path d="M160 40 V76 H196 Z" fill="#9CC3EC"/>
+  <!-- "po" -->
+  <g fill="none" stroke="#005FB8" stroke-width="13" stroke-linecap="round">
+    <circle cx="100" cy="132" r="19"/>
+    <path d="M81 118 V184"/>
+    <circle cx="156" cy="132" r="19"/>
+  </g>
+</svg>
