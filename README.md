@@ -3,19 +3,18 @@
 <img src="assets/icon.svg" width="72" alt="PoLibre" align="right">
 
 A free and open source `.po` editor for machine assisted translation with built-in support for
-[LibreTranslate](https://github.com/LibreTranslate/LibreTranslate), offline / online LLMs (Claude, Gemini, Ollama). Single binary desktop application with CLI support for scripts and workflow automations.
+[LibreTranslate](https://github.com/LibreTranslate/LibreTranslate) and both offline/online LLMs (Claude, Gemini, Ollama). 
 
-Machine translation features are completely optional and can also be used as a standalone .po editor.
+Single binary desktop application with CLI support for scripts and workflow automations. Machine translation features are optional and the software can be used as a standalone .po editor.
 
 ## Features
 
 - Automatic translation suggestions for every `.po` file and language in a project.
-- Works with LibreTranslate, Claude, Gemini, OpenAI and OpenAI-compatible servers (Ollama,
+- Works with [LibreTranslate](https://github.com/LibreTranslate/LibreTranslate), Claude, Gemini, OpenAI and OpenAI-compatible servers (Ollama,
   OpenRouter), or the Claude Code, Gemini and Codex command line tools.
 - Gives LLMs context: the code around each string, a project description, a glossary and
   developer comments.
 - Checks every translation (placeholders, HTML, URLs, plurals, length, ...) before writing it.
-- Marks new translations `#, fuzzy` with a note naming the model; other entries stay untouched.
 - Built-in editor to review: approve or fix translations, get suggestions, reuse existing
   translations, compare languages, keyboard shortcuts.
 - Command line for scripts and CI, with GitHub Actions annotations and a JSON report.
@@ -51,16 +50,9 @@ API keys can also come from `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_K
 `LIBRETRANSLATE_API_KEY`. Settings are saved in `~/.config/polibre/config.json` and shared
 with the app; `--no-config` ignores them. Run `polibre --help` for all options.
 
-### CI
-
 ```sh
 polibre translate . --no-config -p anthropic -m claude-opus-5-5 --report report.json
 ```
-
-Under GitHub Actions, rejected strings show up as warnings. `--fail-on-reject` makes the
-job fail when any are rejected (exit code 3). See
-[`examples/github-workflow.yml`](examples/github-workflow.yml) for a workflow that opens a
-pull request with the new translations.
 
 ## License
 
