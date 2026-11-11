@@ -1,10 +1,11 @@
 # PoLibre
 
-<img src="assets/icon.svg" width="72" alt="PoLibre">
+<img src="assets/icon.svg" width="72" alt="PoLibre" align="right">
 
 A free and open source `.po` editor for machine assisted translation with built-in support for
-[LibreTranslate](https://github.com/LibreTranslate/LibreTranslate) or both offline and online LLMs (Claude, Gemini, Ollama). Single binary desktop app with a command line.
+[LibreTranslate](https://github.com/LibreTranslate/LibreTranslate), offline / online LLMs (Claude, Gemini, Ollama). Single binary desktop app with a command line.
 
+Machine translation features are completely optional and can also be used as a standalone .po editor.
 
 ## Features
 
