@@ -281,6 +281,24 @@ pub struct PoFile {
 }
 
 impl PoFile {
+    /// Marks one entry (found by context and source text) as reviewed in the
+    /// file on disk. Returns false if the entry isn't there.
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    pub fn approve_in_file(path: &Path, msgctxt: Option<&str>, msgid: &str) -> io::Result<bool> {
+        let mut po = Self::load(path)?;
+        let Some(e) = po
+            .entries_mut()
+            .find(|e| !e.obsolete && e.msgid == msgid && e.msgctxt.as_deref() == msgctxt)
+        else {
+            return Ok(false);
+        };
+        if e.is_fuzzy() {
+            e.set_needs_review(false);
+            po.save(path)?;
+        }
+        Ok(true)
+    }
+
     pub fn load(path: &Path) -> io::Result<PoFile> {
         let text = fs::read_to_string(path)?;
         Ok(Self::parse(&text))
@@ -736,6 +754,27 @@ mod corpus_tests {
             "{}",
             po.render()
         );
+    }
+
+    #[test]
+    fn approve_one_entry_in_a_file() {
+        let dir = std::env::temp_dir().join(format!("polibre-approve-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("django.po");
+        std::fs::write(&path, "msgid \"\"\nmsgstr \"\"\n\n# Translated by opus on 2026-11-11, needs review\n#, fuzzy\nmsgctxt \"menu\"\nmsgid \"Open\"\nmsgstr \"Apri\"\n\n#, fuzzy\nmsgid \"Open\"\nmsgstr \"Aperto\"\n").unwrap();
+        assert!(PoFile::approve_in_file(&path, Some("menu"), "Open").unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\n\nmsgctxt \"menu\"\nmsgid \"Open\"\nmsgstr \"Apri\"\n"),
+            "{}",
+            text
+        );
+        assert!(
+            text.contains("#, fuzzy\nmsgid \"Open\"\nmsgstr \"Aperto\""),
+            "the other entry is untouched"
+        );
+        assert!(!PoFile::approve_in_file(&path, None, "Missing").unwrap());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

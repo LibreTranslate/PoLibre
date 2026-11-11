@@ -46,7 +46,7 @@ enum Action {
     Insert(String),
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Show {
     All,
     Review,
@@ -114,6 +114,8 @@ pub struct Editor {
     /// Entries edited or approved in the current view: they stay listed even
     /// if they no longer match the filter, so they don't vanish while typing.
     keep: BTreeSet<usize>,
+    /// Entry to show and focus once the list is laid out (see [`Editor::focus_entry`]).
+    pending_go: Option<usize>,
     /// Entry whose first translation box gets the keyboard focus, and for how
     /// many more frames to ask (see [`Editor::focus_on`]).
     focus: Option<(usize, u8)>,
@@ -194,6 +196,7 @@ impl Editor {
             open_context: BTreeSet::new(),
             keep: BTreeSet::new(),
             focus: None,
+            pending_go: None,
             service: String::new(),
             suggesting: BTreeSet::new(),
             suggest_errors: BTreeMap::new(),
@@ -325,6 +328,25 @@ impl Editor {
                 .find(|&&i| self.needs_attention(i))
         };
         found.copied()
+    }
+
+    /// Shows one string (from the Results tab): switches to its file, keeps it
+    /// listed whatever the filter, and puts the cursor in it.
+    pub fn focus_entry(&mut self, path: &std::path::Path, msgctxt: Option<&str>, msgid: &str) {
+        if let Some(f) = self.files.iter().position(|p| p == path) {
+            if f != self.file && self.switch_file(f).is_err() {
+                return;
+            }
+        }
+        let found = self.rows.iter().copied().find(|&i| {
+            let e = self.entry(i);
+            e.msgid == msgid && e.msgctxt.as_deref() == msgctxt
+        });
+        if let Some(i) = found {
+            self.search.clear();
+            self.keep.insert(i);
+            self.pending_go = Some(i);
+        }
     }
 
     /// Makes `i` the current entry: shows its page and puts the cursor in it.
@@ -813,6 +835,9 @@ impl Editor {
             .copied()
             .filter(|&i| self.keep.contains(&i) || self.matches(i, self.show, &search))
             .collect();
+        if let Some(i) = self.pending_go.take() {
+            self.go_to(&shown, i);
+        }
         self.shortcuts(ui, &shown);
         let pages = shown.len().div_ceil(PAGE).max(1);
         self.page = self.page.min(pages - 1);
@@ -1612,6 +1637,32 @@ mod tests {
         assert_eq!(ed.entry(b).msgstr, vec!["%(name)s"]);
         assert!(ed.changed.contains(&a) && ed.changed.contains(&b));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn focus_a_string_from_the_results() {
+        let a = temp_po("focus-a", &[("One", "Uno", true)]);
+        let b = temp_po("focus-b", &[("Two", "Due", false), ("Three", "Tre", false)]);
+        let mut ed = Editor::open("it", "Italian", vec![a.clone(), b.clone()], 0, None).unwrap();
+        assert_eq!(ed.show, Show::Review, "opens on strings needing review");
+        ed.focus_entry(&b, None, "Three");
+        assert_eq!(ed.file, 1, "switched to the string's file");
+        let three = ed.rows[1];
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut ed, &[]);
+        assert_eq!(ed.current, Some(three));
+        frame(&ctx, &mut ed, &[]);
+        assert!(
+            ctx.memory(|m| m.focused()).is_some(),
+            "the cursor is in its box"
+        );
+        assert!(
+            ed.keep.contains(&three),
+            "listed even though the filter is Needs review"
+        );
+        for p in [a, b] {
+            std::fs::remove_dir_all(p.parent().unwrap()).ok();
+        }
     }
 
     #[test]

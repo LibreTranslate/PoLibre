@@ -102,12 +102,15 @@ pub enum Event {
     },
     Translated {
         lang: String,
+        path: PathBuf,
+        msgctxt: Option<String>,
         msgid: String,
         msgstr: String,
     },
     Rejected {
         lang: String,
         path: PathBuf,
+        msgctxt: Option<String>,
         msgid: String,
         reason: String,
     },
@@ -466,6 +469,8 @@ pub fn run(
                                 summary.translated += 1;
                                 ctx.send(Event::Translated {
                                     lang: t.lang.clone(),
+                                    path: path.clone(),
+                                    msgctxt: w.msgctxt.clone(),
                                     msgid: w.msgid.clone(),
                                     msgstr: shown,
                                 });
@@ -476,6 +481,7 @@ pub fn run(
                             ctx.send(Event::Rejected {
                                 lang: t.lang.clone(),
                                 path: path.clone(),
+                                msgctxt: w.msgctxt.clone(),
                                 msgid: w.msgid.clone(),
                                 reason,
                             });

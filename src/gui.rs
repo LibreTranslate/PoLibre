@@ -235,6 +235,7 @@ enum LogKind {
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Languages,
+    Results,
     Console,
     Editor,
 }
@@ -244,6 +245,8 @@ enum Tab {
 enum Pending {
     CloseEditor,
     OpenEditor(String),
+    /// Open the editor on one string from the results.
+    EditEntry(ResultRef),
     SwitchFile(usize),
     Quit,
 }
@@ -262,12 +265,28 @@ struct ConsoleEntry {
 
 const CONSOLE_MAX: usize = 3000;
 
+/// Where a translated (or rejected) string lives, to approve or edit it.
+#[derive(Clone)]
+struct ResultRef {
+    code: String,
+    path: PathBuf,
+    msgctxt: Option<String>,
+    msgid: String,
+}
+
+/// One row of the Results tab.
 struct LogLine {
     kind: LogKind,
     /// Language name; empty for general messages.
     lang: String,
     a: String,
     b: String,
+    /// The string in its file; None for general messages and previews.
+    entry: Option<ResultRef>,
+    /// The translation was approved from the Results tab.
+    approved: bool,
+    /// Why approving failed.
+    problem: Option<String>,
 }
 
 struct Job {
@@ -284,7 +303,6 @@ struct Job {
     eta: Option<f32>,
     dry_run: bool,
     mark_fuzzy: bool,
-    langs: usize,
     finished: Option<Summary>,
 }
 
@@ -491,7 +509,8 @@ impl App {
         // Developer aid: POLIBRE_AUTOSTART=it,de selects languages and starts a preview run.
         if let Ok(l) = std::env::var("POLIBRE_AUTOSTART") {
             app.selected = l.split(',').map(|s| s.trim().to_string()).collect();
-            app.dry_run = true; // never write files from this dev hook
+            // Previews only, unless POLIBRE_AUTOSTART_WRITE=1 (use on a scratch copy).
+            app.dry_run = std::env::var("POLIBRE_AUTOSTART_WRITE").is_err();
             app.limit = 40;
             app.start(false);
         }
@@ -666,8 +685,8 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         let c2 = cancel.clone();
         self.log.clear();
+        self.tab = Tab::Results;
         self.console_t0 = Instant::now();
-        let langs = targets.len();
         std::thread::spawn(move || engine::run(provider, settings, targets, tx, c2));
         self.job = Some(Job {
             rx,
@@ -683,7 +702,6 @@ impl App {
             eta: None,
             dry_run: self.dry_run,
             mark_fuzzy: self.mark_fuzzy,
-            langs,
             finished: None,
         });
     }
@@ -973,11 +991,23 @@ impl App {
                     lang: String::new(),
                     a: m,
                     b: String::new(),
+                    entry: None,
+                    approved: false,
+                    problem: None,
+                };
+                // Strings of a preview aren't in the files, so they can't be approved or edited.
+                let entry = |code: &str, path: PathBuf, msgctxt: Option<String>, msgid: &str| {
+                    (!job.dry_run).then(|| ResultRef {
+                        code: code.to_string(),
+                        path,
+                        msgctxt,
+                        msgid: msgid.to_string(),
+                    })
                 };
                 match ev {
+                    // Shown in the Console only.
                     Event::Info(m) => {
-                        new_console.push((Some(LogKind::Info), sentence(&m), String::new()));
-                        new_logs.push(msg(LogKind::Info, sentence(&m)))
+                        new_console.push((Some(LogKind::Info), sentence(&m), String::new()))
                     }
                     Event::Warn(m) => {
                         new_console.push((Some(LogKind::Warn), sentence(&m), String::new()));
@@ -999,6 +1029,8 @@ impl App {
                     Event::Working { texts, .. } => job.current = texts,
                     Event::Translated {
                         lang,
+                        path,
+                        msgctxt,
                         msgid,
                         msgstr,
                     } => {
@@ -1007,23 +1039,31 @@ impl App {
                         new_logs.push(LogLine {
                             kind: LogKind::Ok,
                             lang: langs::name(&lang),
+                            entry: entry(&lang, path, msgctxt, &msgid),
                             a: msgid,
                             b: msgstr,
+                            // Already final when "Mark as fuzzy" is off.
+                            approved: !job.mark_fuzzy,
+                            problem: None,
                         });
                     }
                     Event::Rejected {
                         lang,
+                        path,
+                        msgctxt,
                         msgid,
                         reason,
-                        ..
                     } => {
                         job.done += 1;
                         job.rejected += 1;
                         new_logs.push(LogLine {
                             kind: LogKind::Warn,
                             lang: langs::name(&lang),
+                            entry: entry(&lang, path, msgctxt, &msgid),
                             a: msgid,
                             b: format!("Not used: {}", reason),
+                            approved: false,
+                            problem: None,
                         });
                     }
                     Event::Failed { count } => job.done += count,
@@ -1080,6 +1120,15 @@ impl App {
                 }
             }
             Pending::OpenEditor(code) => self.open_editor(&code),
+            Pending::EditEntry(r) => {
+                if self.editor.as_ref().is_none_or(|e| e.lang != r.code) {
+                    self.open_editor(&r.code);
+                }
+                if let Some(ed) = &mut self.editor {
+                    ed.focus_entry(&r.path, r.msgctxt.as_deref(), &r.msgid);
+                    self.tab = Tab::Editor;
+                }
+            }
             Pending::SwitchFile(i) => {
                 if let Some(ed) = &mut self.editor {
                     if let Err(e) = ed.switch_file(i) {
@@ -1281,7 +1330,11 @@ impl App {
     /// Collapses or restores the translation settings panel, and remembers it.
     fn settings_toggle(&mut self, ui: &mut egui::Ui) {
         let hidden = self.cfg.hide_settings;
-        let tip = if hidden { "Show the translation settings" } else { "Hide the translation settings" };
+        let tip = if hidden {
+            "Show the translation settings"
+        } else {
+            "Hide the translation settings"
+        };
         let b = egui::Button::new(RichText::new("⚙").size(17.0));
         if ui.add(b).on_hover_text(tip).clicked() {
             self.cfg.hide_settings = !hidden;
@@ -2069,48 +2122,61 @@ impl App {
                     };
                     ui.add(egui::Label::new(RichText::new(text).weak()).wrap());
                 }
-            } else if let Some(s) = &job.finished {
-                let (kind, text) = completion(s, job.dry_run, job.mark_fuzzy, job.langs);
+            } else if let Some((kind, text)) = job.finished.as_ref().and_then(run_problems) {
+                // Only worth a message when something went wrong.
                 note(ui, kind, &text);
             }
         }
         ui.add_space(6.0);
     }
 
-    fn results(&self, ui: &mut egui::Ui) {
+    /// The Results tab: what the last run translated or rejected.
+    fn results(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
         if self.log.is_empty() {
+            let translated = self
+                .job
+                .as_ref()
+                .and_then(|j| j.finished.as_ref())
+                .is_some_and(|f| f.translated > 0);
+            let text = if self.running() {
+                "Translations will appear here."
+            } else if translated {
+                "All the new translations have been reviewed."
+            } else {
+                "Nothing was translated."
+            };
+            ui.label(RichText::new(text).weak());
             return;
         }
-        ui.label(RichText::new("Results").text_style(TextStyle::Name("group".into())));
-        ui.add_space(2.0);
         let gap = 10.0;
         let icon_w = 16.0;
         let body = TextStyle::Body.resolve(ui.style());
+        let width = |t: &str, f: &egui::FontId| {
+            ui.fonts(|fo| {
+                fo.layout_no_wrap(t.into(), f.clone(), Color32::WHITE)
+                    .size()
+                    .x
+            })
+        };
         let lang_w = self
             .log
             .iter()
-            .map(|l| {
-                ui.fonts(|f| {
-                    f.layout_no_wrap(l.lang.clone(), body.clone(), Color32::WHITE)
-                        .size()
-                        .x
-                })
-            })
+            .map(|l| width(&l.lang, &body))
             .fold(
-                ui.fonts(|f| {
-                    f.layout_no_wrap(
-                        "Language".into(),
-                        TextStyle::Small.resolve(ui.style()),
-                        Color32::WHITE,
-                    )
-                    .size()
-                    .x
-                }),
+                width("Language", &TextStyle::Small.resolve(ui.style())),
                 f32::max,
             )
             .min(160.0)
             + 2.0;
-        let text_w = ((ui.available_width() - icon_w - lang_w - gap * 3.0 - 14.0) / 2.0).max(120.0);
+        let small = egui::TextStyle::Button.resolve(ui.style());
+        let actions_w = width("✔", &small)
+            + width("Edit", &small)
+            + 2.0 * ui.spacing().button_padding.x * 2.0
+            + gap;
+        let text_w = ((ui.available_width() - icon_w - lang_w - actions_w - gap * 4.0 - 14.0)
+            / 2.0)
+            .max(120.0);
         let header = |t: &str| RichText::new(t).small().weak();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
@@ -2121,17 +2187,14 @@ impl App {
         });
         ui.separator();
         let stripe = ui.visuals().faint_bg_color;
+        let (mut approve, mut edit) = (None, None);
         egui::ScrollArea::vertical()
             .id_salt("results")
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for (i, l) in self.log.iter().enumerate() {
-                    let fill = if i % 2 == 1 {
-                        stripe
-                    } else {
-                        Color32::TRANSPARENT
-                    };
+                    let fill = if i % 2 == 1 { stripe } else { Color32::TRANSPARENT };
                     egui::Frame::none()
                         .fill(fill)
                         .inner_margin(egui::Margin::symmetric(0.0, 3.0))
@@ -2140,25 +2203,77 @@ impl App {
                                 ui.spacing_mut().item_spacing.x = gap;
                                 cell(ui, icon_w, icon(l.kind));
                                 if l.lang.is_empty() {
-                                    cell(
-                                        ui,
-                                        lang_w + text_w * 2.0 + gap * 2.0,
-                                        RichText::new(&l.a),
-                                    );
-                                } else {
-                                    cell(ui, lang_w, RichText::new(&l.lang).weak());
-                                    cell(ui, text_w, RichText::new(&l.a));
-                                    let t = RichText::new(&l.b);
-                                    cell(
-                                        ui,
-                                        text_w,
-                                        if l.kind == LogKind::Ok { t } else { t.weak() },
-                                    );
+                                    cell(ui, lang_w + text_w * 2.0 + gap * 2.0, RichText::new(&l.a));
+                                    return;
                                 }
+                                cell(ui, lang_w, RichText::new(&l.lang).weak());
+                                cell(ui, text_w, RichText::new(&l.a));
+                                let t = RichText::new(&l.b);
+                                ui.allocate_ui_with_layout(egui::vec2(text_w, 0.0), Layout::top_down(Align::Min), |ui| {
+                                    ui.set_width(text_w);
+                                    ui.add(egui::Label::new(if l.kind == LogKind::Ok { t } else { t.weak() }).wrap());
+                                    if let Some(p) = &l.problem {
+                                        ui.add(egui::Label::new(RichText::new(p).small().color(RED)).wrap());
+                                    }
+                                });
+                                let Some(r) = &l.entry else { return };
+                                ui.allocate_ui_with_layout(egui::vec2(actions_w, 0.0), Layout::right_to_left(Align::Min), |ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                if ui.button("Edit").on_hover_text(format!("Open this string in the {} translations", l.lang)).clicked() {
+                                    edit = Some(r.clone());
+                                }
+                                if l.kind == LogKind::Ok {
+                                    let b = egui::Button::new(RichText::new("✔").color(if l.approved { ui.visuals().weak_text_color() } else { GREEN }));
+                                    let tip = if l.approved { "Reviewed" } else { "Approve this translation" };
+                                    if ui.add_enabled(!l.approved, b).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
+                                        approve = Some(i);
+                                    }
+                                }
+                                });
                             });
                         });
                 }
             });
+        if let Some(i) = approve {
+            self.approve_result(i);
+        }
+        if let Some(r) = edit {
+            // No "Save changes?" question when the string is in the file already open.
+            let same_file = self
+                .editor
+                .as_ref()
+                .is_some_and(|e| e.lang == r.code && *e.path() == r.path);
+            if same_file {
+                self.perform(Pending::EditEntry(r));
+            } else {
+                self.request(Pending::EditEntry(r));
+            }
+        }
+    }
+
+    /// Marks a translated string as reviewed, directly in its file.
+    fn approve_result(&mut self, i: usize) {
+        let Some(r) = self.log[i].entry.clone() else {
+            return;
+        };
+        let row = &mut self.log[i];
+        match crate::po::PoFile::approve_in_file(&r.path, r.msgctxt.as_deref(), &r.msgid) {
+            // Done with it: take it off the list.
+            Ok(true) => {
+                self.log.remove(i);
+            }
+            Ok(false) => row.problem = Some("This string is no longer in the file.".into()),
+            Err(e) => row.problem = Some(format!("Unable to save {}: {}", r.path.display(), e)),
+        }
+        // Refresh the counts, and an open editor that has nothing unsaved.
+        let sel = self.selected.clone();
+        self.scan();
+        self.selected = sel;
+        if let Some(ed) = &mut self.editor {
+            if !ed.dirty() && *ed.path() == r.path {
+                let _ = ed.load();
+            }
+        }
     }
 }
 
@@ -2365,59 +2480,30 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{} {}", thousands(n), if n == 1 { one } else { many })
 }
 
-fn completion(s: &Summary, dry_run: bool, mark_fuzzy: bool, langs: usize) -> (LogKind, String) {
-    let secs = s.elapsed.as_secs_f32();
-    let time = if secs < 90.0 {
-        format!("{:.0} seconds", secs.max(1.0))
-    } else {
-        format!("{:.0} minutes", secs / 60.0)
-    };
-    let mut text = if let Some(f) = &s.fatal {
-        format!("Translation stopped because of a problem. {}", sentence(f))
-    } else if s.cancelled {
-        format!(
-            "Stopped. {} were translated before stopping.",
-            plural(s.translated, "string", "strings")
-        )
-    } else {
-        format!(
-            "Translated {} in {} ({}).",
-            plural(s.translated, "string", "strings"),
-            plural(langs, "language", "languages"),
-            time
-        )
-    };
-    if s.translated > 0 {
-        text.push_str(if dry_run {
-            " This was a preview, so no files were changed."
-        } else if mark_fuzzy {
-            " They're marked as needing review (fuzzy), so a translator can check them before they're used."
-        } else {
-            ""
-        });
+/// What went wrong in a finished run, if anything.
+fn run_problems(s: &Summary) -> Option<(LogKind, String)> {
+    if let Some(f) = &s.fatal {
+        return Some((
+            LogKind::Err,
+            format!("Translation stopped because of a problem. {}", sentence(f)),
+        ));
     }
+    let mut text = Vec::new();
     if s.rejected > 0 {
-        text.push_str(&format!(
-            " {} didn't pass the quality checks and were left untranslated.",
-            plural(s.rejected, "translation", "translations")
+        text.push(format!(
+            "{} didn't pass the quality checks and {} left untranslated; use Edit to translate {} yourself.",
+            plural(s.rejected, "translation", "translations"),
+            if s.rejected == 1 { "was" } else { "were" },
+            if s.rejected == 1 { "it" } else { "them" },
         ));
     }
     if s.failed > 0 {
-        text.push_str(&format!(
-            " {} couldn't be sent to the service.",
+        text.push(format!(
+            "{} couldn't be sent to the service.",
             plural(s.failed, "string", "strings")
         ));
     }
-    let kind = if s.fatal.is_some() {
-        LogKind::Err
-    } else if s.rejected > 0 || s.failed > 0 {
-        LogKind::Warn
-    } else if s.cancelled {
-        LogKind::Info
-    } else {
-        LogKind::Ok
-    };
-    (kind, text)
+    (!text.is_empty()).then(|| (LogKind::Warn, text.join(" ")))
 }
 
 /// Opens the system's folder/file chooser without extra dependencies.
@@ -2614,6 +2700,9 @@ impl eframe::App for App {
                         }
                         ui.add_space(4.0);
                     }
+                    if self.job.is_some() {
+                        ui.selectable_value(&mut self.tab, Tab::Results, "Results");
+                    }
                     ui.selectable_value(&mut self.tab, Tab::Console, "Console");
                 });
                 if close {
@@ -2628,25 +2717,19 @@ impl eframe::App for App {
                 });
                 return;
             }
-            let has_job = self.job.is_some();
-            let h = ui.available_height();
-            let mut bottom = egui::TopBottomPanel::bottom("run").frame(egui::Frame::none()).show_separator_line(true);
-            bottom = if has_job {
-                bottom.resizable(true).default_height(h * 0.5).height_range(170.0..=(h - 230.0).max(171.0))
-            } else {
-                bottom.resizable(false)
-            };
-            bottom.show_inside(ui, |ui| {
-                unclip(ui);
-                self.action_bar(ui);
-                if has_job {
-                    self.results(ui);
-                }
-            });
+            egui::TopBottomPanel::bottom("run")
+                .frame(egui::Frame::none())
+                .show_separator_line(true)
+                .resizable(false)
+                .show_inside(ui, |ui| {
+                    unclip(ui);
+                    self.action_bar(ui);
+                });
             egui::CentralPanel::default().frame(egui::Frame::none()).show_inside(ui, |ui| {
                 unclip(ui);
                 match self.tab {
                 Tab::Languages => self.languages_panel(ui),
+                Tab::Results => self.results(ui),
                 Tab::Console => self.console_panel(ui),
                 Tab::Editor => self.languages_panel(ui),
                 }

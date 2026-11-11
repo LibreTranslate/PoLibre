@@ -872,16 +872,19 @@ fn cmd_translate(o: &Opts) -> Result<i32, String> {
         match &ev {
             Event::Translated {
                 lang,
+                path,
                 msgid,
                 msgstr,
-            } => {
-                report_ok.push(serde_json::json!({"lang": lang, "msgid": msgid, "msgstr": msgstr}))
-            }
+                ..
+            } => report_ok.push(
+                serde_json::json!({"lang": lang, "file": path, "msgid": msgid, "msgstr": msgstr}),
+            ),
             Event::Rejected {
                 lang,
                 path,
                 msgid,
                 reason,
+                ..
             } => report_rej.push(
                 serde_json::json!({"lang": lang, "file": path, "msgid": msgid, "reason": reason}),
             ),
