@@ -1878,6 +1878,7 @@ dependencies = [
 name = "polibre"
 version = "0.9.3"
 dependencies = [
+ "ab_glyph",
  "ctrlc",
  "eframe",
  "serde",

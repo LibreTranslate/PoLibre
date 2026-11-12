@@ -95,13 +95,23 @@ pub fn run(path: Option<String>) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // Fonts and style
 
-/// System fonts covering CJK (and Hangul), tried in order. The first readable
-/// file from each group is appended as a fallback after Inter, so only glyphs
-/// Inter lacks come from these. `POLIBRE_FONT` (a path, optionally
-/// `path#index` for collections) is tried first.
-const FALLBACK_FONTS: &[&[&str]] = &[
-    // Chinese/Japanese ideographs and kana
-    &[
+/// Writing systems Inter lacks, each with a sample letter, its fontconfig
+/// language code, and known system fonts to try. For every script not yet
+/// covered by a loaded font, the first candidate that really has the letter
+/// is added as a fallback after Inter. On Linux the candidates also include
+/// whatever fontconfig lists for the language, since font paths differ
+/// between distributions. `POLIBRE_FONT` (a path, optionally `path#index`
+/// for collections) is tried first for every script.
+struct Script {
+    sample: char,
+    lang: &'static str,
+    cjk: bool,
+    paths: &'static [&'static str],
+}
+
+const SCRIPTS: &[Script] = &[
+    // Chinese ideographs
+    Script { sample: '中', lang: "zh-cn", cjk: true, paths: &[
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/System/Library/Fonts/STHeiti Medium.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
@@ -109,23 +119,192 @@ const FALLBACK_FONTS: &[&[&str]] = &[
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
         "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
         "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\simsun.ttc",
+    ] },
+    // Traditional-only ideographs (some Simplified fonts lack them)
+    Script { sample: '臺', lang: "zh-tw", cjk: true, paths: &[
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "C:\\Windows\\Fonts\\msjh.ttc",
+    ] },
+    // Japanese kana
+    Script { sample: 'あ', lang: "ja", cjk: true, paths: &[
         "C:\\Windows\\Fonts\\YuGothM.ttc",
         "C:\\Windows\\Fonts\\meiryo.ttc",
-        "C:\\Windows\\Fonts\\simsun.ttc",
-    ],
+    ] },
     // Korean Hangul
-    &[
+    Script { sample: '한', lang: "ko", cjk: true, paths: &[
         "/System/Library/Fonts/AppleSDGothicNeo.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/nanum/NanumGothic.ttf",
         "C:\\Windows\\Fonts\\malgun.ttf",
-    ],
+    ] },
+    Script { sample: 'ب', lang: "ar", cjk: false, paths: &[
+        "/System/Library/Fonts/GeezaPro.ttc",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "C:\\Windows\\Fonts\\tahoma.ttf",
+    ] },
+    Script { sample: 'ש', lang: "he", cjk: false, paths: &[
+        "/System/Library/Fonts/ArialHB.ttc",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+    ] },
+    Script { sample: 'क', lang: "hi", cjk: false, paths: &[
+        "/System/Library/Fonts/Kohinoor.ttc",
+        "/System/Library/Fonts/Supplemental/DevanagariMT.ttc",
+        "C:\\Windows\\Fonts\\Nirmala.ttf",
+    ] },
+    Script { sample: 'ক', lang: "bn", cjk: false, paths: &[
+        "/System/Library/Fonts/KohinoorBangla.ttc",
+        "C:\\Windows\\Fonts\\Nirmala.ttf",
+    ] },
+    Script { sample: 'ਕ', lang: "pa", cjk: false, paths: &[
+        "/System/Library/Fonts/Supplemental/Gurmukhi MN.ttc",
+        "C:\\Windows\\Fonts\\Nirmala.ttf",
+    ] },
+    Script { sample: 'ક', lang: "gu", cjk: false, paths: &[
+        "/System/Library/Fonts/KohinoorGujarati.ttc",
+        "C:\\Windows\\Fonts\\Nirmala.ttf",
+    ] },
+    Script { sample: 'க', lang: "ta", cjk: false, paths: &[
+        "/System/Library/Fonts/Supplemental/Tamil Sangam MN.ttc",
+        "C:\\Windows\\Fonts\\Nirmala.ttf",
+    ] },
+    Script { sample: 'క', lang: "te", cjk: false, paths: &[
+        "/System/Library/Fonts/KohinoorTelugu.ttc",
+        "C:\\Windows\\Fonts\\Nirmala.ttf",
+    ] },
+    Script { sample: 'ಕ', lang: "kn", cjk: false, paths: &[
+        "/System/Library/Fonts/NotoSansKannada.ttc",
+        "C:\\Windows\\Fonts\\Nirmala.ttf",
+    ] },
+    Script { sample: 'ക', lang: "ml", cjk: false, paths: &[
+        "/System/Library/Fonts/Supplemental/Malayalam Sangam MN.ttc",
+        "C:\\Windows\\Fonts\\Nirmala.ttf",
+    ] },
+    Script { sample: 'ක', lang: "si", cjk: false, paths: &[
+        "/System/Library/Fonts/Supplemental/Sinhala Sangam MN.ttc",
+        "C:\\Windows\\Fonts\\Nirmala.ttf",
+    ] },
+    Script { sample: 'ก', lang: "th", cjk: false, paths: &[
+        "/System/Library/Fonts/ThonburiUI.ttc",
+        "/System/Library/Fonts/Thonburi.ttc",
+        "C:\\Windows\\Fonts\\LeelawUI.ttf",
+        "C:\\Windows\\Fonts\\tahoma.ttf",
+    ] },
+    Script { sample: 'ກ', lang: "lo", cjk: false, paths: &[
+        "/System/Library/Fonts/Supplemental/Lao Sangam MN.ttf",
+        "C:\\Windows\\Fonts\\LeelawUI.ttf",
+    ] },
+    Script { sample: 'ក', lang: "km", cjk: false, paths: &[
+        "/System/Library/Fonts/Supplemental/Khmer Sangam MN.ttf",
+        "C:\\Windows\\Fonts\\LeelawUI.ttf",
+        "C:\\Windows\\Fonts\\KhmerUI.ttf",
+    ] },
+    Script { sample: 'က', lang: "my", cjk: false, paths: &[
+        "/System/Library/Fonts/NotoSansMyanmar.ttc",
+        "C:\\Windows\\Fonts\\mmrtext.ttf",
+    ] },
+    Script { sample: 'ა', lang: "ka", cjk: false, paths: &[
+        "/System/Library/Fonts/SFGeorgian.ttf",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+    ] },
+    Script { sample: 'Ա', lang: "hy", cjk: false, paths: &[
+        "/System/Library/Fonts/SFArmenian.ttf",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+    ] },
+    Script { sample: 'አ', lang: "am", cjk: false, paths: &[
+        "/System/Library/Fonts/Supplemental/KefaIII.ttf",
+        "C:\\Windows\\Fonts\\ebrima.ttf",
+    ] },
 ];
+
+/// Fonts fontconfig knows for a language, best first: sans-serif regular
+/// faces before the rest. Empty where fontconfig isn't installed.
+fn fontconfig_fonts(lang: &str) -> Vec<(String, u32)> {
+    if cfg!(any(target_os = "windows", target_os = "macos")) {
+        return Vec::new();
+    }
+    fc_list(lang)
+}
+
+fn fc_list(lang: &str) -> Vec<(String, u32)> {
+    let Ok(out) = std::process::Command::new("fc-list")
+        .arg(format!(":lang={lang}"))
+        .arg("-f")
+        .arg("%{file}\t%{index}\t%{family}\t%{style}\n")
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    let mut fonts: Vec<(i32, String, u32)> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            let (file, index) = (f.next()?, f.next()?.parse().ok()?);
+            let (family, style) = (f.next().unwrap_or("").to_lowercase(), f.next().unwrap_or("").to_lowercase());
+            let mut score = 0;
+            if family.contains("sans") || family.contains("gothic") || family.contains("hei") {
+                score -= 4;
+            }
+            if family.contains("mono") || family.contains("serif") && !family.contains("sans") {
+                score += 4;
+            }
+            if style.contains("regular") || style.contains("book") || style.contains("normal") {
+                score -= 2;
+            } else if style.contains("bold") || style.contains("italic") || style.contains("oblique") || style.contains("light") || style.contains("thin") {
+                score += 2;
+            }
+            Some((score, file.to_string(), index))
+        })
+        .collect();
+    fonts.sort();
+    fonts.dedup_by(|a, b| a.1 == b.1 && a.2 == b.2);
+    fonts.into_iter().map(|(_, f, i)| (f, i)).collect()
+}
+
+/// Whether the font has a real glyph for `c`.
+fn has_glyph(bytes: &[u8], index: u32, c: char) -> bool {
+    use ab_glyph::Font;
+    ab_glyph::FontRef::try_from_slice_and_index(bytes, index)
+        .map(|f| f.glyph_id(c).0 != 0)
+        .unwrap_or(false)
+}
+
+/// Picks the system fonts to add after Inter: (path, index, data, is CJK).
+fn fallback_fonts() -> Vec<(String, u32, Vec<u8>, bool)> {
+    let forced = std::env::var("POLIBRE_FONT").ok().map(|p| match p.rsplit_once('#') {
+        Some((f, i)) if i.parse::<u32>().is_ok() => (f.to_string(), i.parse().unwrap()),
+        _ => (p, 0),
+    });
+    let mut chosen: Vec<(String, u32, Vec<u8>, bool)> = Vec::new();
+    for s in SCRIPTS {
+        if has_glyph(INTER_REGULAR, 0, s.sample)
+            || chosen.iter().any(|(_, i, b, _)| has_glyph(b, *i, s.sample))
+        {
+            continue;
+        }
+        let candidates = forced
+            .iter()
+            .cloned()
+            .chain(s.paths.iter().map(|p| (p.to_string(), 0)))
+            .chain(fontconfig_fonts(s.lang));
+        for (path, index) in candidates {
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            if has_glyph(&bytes, index, s.sample) {
+                chosen.push((path, index, bytes, s.cjk));
+                break;
+            }
+        }
+    }
+    chosen
+}
 
 fn semibold() -> FontFamily {
     FontFamily::Name("semibold".into())
@@ -151,39 +330,18 @@ fn setup_fonts(ctx: &egui::Context) {
     bold.extend(defaults);
     fonts.families.insert(semibold(), bold);
 
-    let mut groups: Vec<Vec<(String, u32)>> = Vec::new();
-    if let Ok(p) = std::env::var("POLIBRE_FONT") {
-        groups.push(vec![match p.rsplit_once('#') {
-            Some((f, i)) if i.parse::<u32>().is_ok() => (f.to_string(), i.parse().unwrap()),
-            _ => (p, 0),
-        }]);
-    }
-    groups.extend(
-        FALLBACK_FONTS
-            .iter()
-            .map(|g| g.iter().map(|p| (p.to_string(), 0)).collect()),
-    );
-    let mut loaded = BTreeSet::new();
-    for group in groups {
-        for (path, index) in group {
-            if loaded.contains(&path) {
-                break; // this file already covers the group
-            }
-            let Ok(bytes) = std::fs::read(&path) else {
-                continue;
-            };
-            let name = format!("fallback:{path}");
-            let mut data = egui::FontData::from_owned(bytes);
-            data.index = index;
+    for (path, index, bytes, cjk) in fallback_fonts() {
+        let name = format!("fallback:{path}#{index}");
+        let mut data = egui::FontData::from_owned(bytes);
+        data.index = index;
+        if cjk {
             // CJK fonts sit higher than Inter; nudge them onto the same baseline
             // so mixed strings like "有効なCRS" line up.
             data.tweak.y_offset_factor = 0.12;
-            fonts.font_data.insert(name.clone(), data);
-            for family in [FontFamily::Proportional, FontFamily::Monospace, semibold()] {
-                fonts.families.entry(family).or_default().push(name.clone());
-            }
-            loaded.insert(path);
-            break;
+        }
+        fonts.font_data.insert(name.clone(), data);
+        for family in [FontFamily::Proportional, FontFamily::Monospace, semibold()] {
+            fonts.families.entry(family).or_default().push(name.clone());
         }
     }
     ctx.set_fonts(fonts);
@@ -3000,5 +3158,26 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    /// Runs only where fontconfig is installed (any Linux desktop).
+    #[test]
+    fn fontconfig_finds_fonts_with_the_glyphs() {
+        if std::process::Command::new("fc-list").arg("--version").output().is_err() {
+            return;
+        }
+        for (lang, c) in [("ko", '한'), ("zh-cn", '中'), ("th", 'ก')] {
+            let fonts = super::fc_list(lang);
+            let first = fonts.iter().find(|(p, i)| {
+                std::fs::read(p).is_ok_and(|b| super::has_glyph(&b, *i, c))
+            });
+            println!("{lang}: {} fonts, using {:?}", fonts.len(), first);
+            if !fonts.is_empty() {
+                assert!(first.is_some(), "no listed {lang} font has {c}");
+            }
+        }
     }
 }
