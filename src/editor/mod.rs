@@ -899,7 +899,8 @@ impl Editor {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(self.page > 0, egui::Button::new("Previous page"))
+                .add_enabled(self.page > 0, egui::Button::new("⏴"))
+                .on_hover_text("Previous page")
                 .clicked()
             {
                 self.page -= 1;
@@ -911,7 +912,8 @@ impl Editor {
             };
             ui.label(RichText::new(text).weak());
             if ui
-                .add_enabled(self.page + 1 < pages, egui::Button::new("Next page"))
+                .add_enabled(self.page + 1 < pages, egui::Button::new("⏵"))
+                .on_hover_text("Next page")
                 .clicked()
             {
                 self.page += 1;
