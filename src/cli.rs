@@ -25,7 +25,7 @@ USAGE:
     polibre models [OPTS]              List models offered by a provider
     polibre config [show|path] [OPTS]  Show or save default settings
     polibre check [PATH] [-l LANGS]    Run the validators on existing translations
-                                       (--only-auto: only PoLibre entries)
+                                       (--only-fuzzy: only entries needing review)
     polibre prompt [PATH] -l LANG      Print the LLM prompt for the first batch (debug)
 
 PATH defaults to the current directory; it can be a project folder, a locale
@@ -56,7 +56,6 @@ TRANSLATE OPTIONS:
         --batch-size N      Entries per request (default: 20 LLM, 25 LibreTranslate)
         --limit N           Translate at most N entries in this run
         --include-fuzzy     Also re-translate entries already marked fuzzy
-        --no-comment        Don't add the "# Translated by <model>" comment
         --no-fuzzy          Don't mark translations fuzzy (they won't need review)
         --no-retry          Don't re-ask the LLM about translations that fail validation
         --debug             Print every request, model reply and check to stderr [POLIBRE_DEBUG]
@@ -69,8 +68,7 @@ TRANSLATE OPTIONS:
     -y, --yes               Accepted for compatibility; never prompts anyway
 
 Machine translations are marked "#, fuzzy" (so they are not used until a
-human reviews them; --no-fuzzy turns this off) and get a
-"# Translated by <model>" comment.
+human reviews them; --no-fuzzy turns this off).
 
 EXIT CODES: 0 success, 1 error, 2 bad usage, 3 rejected entries (--fail-on-reject),
             130 interrupted
@@ -92,7 +90,6 @@ struct Opts {
     batch_size: Option<usize>,
     limit: Option<usize>,
     include_fuzzy: bool,
-    no_comment: bool,
     no_fuzzy: bool,
     no_retry: bool,
     debug: bool,
@@ -103,7 +100,7 @@ struct Opts {
     no_config: bool,
     progress: Option<String>,
     json: bool,
-    only_auto: bool,
+    only_fuzzy: bool,
 }
 
 fn env(name: &str) -> Option<String> {
@@ -163,7 +160,8 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--batch-size" => o.batch_size = Some(num(val(&flag)?, &flag)?),
             "--limit" => o.limit = Some(num(val(&flag)?, &flag)?),
             "--include-fuzzy" => o.include_fuzzy = true,
-            "--no-comment" => o.no_comment = true,
+            // No longer adds anything; accepted so existing scripts keep working.
+            "--no-comment" => {}
             "--no-fuzzy" => o.no_fuzzy = true,
             "--no-retry" => o.no_retry = true,
             "--debug" => o.debug = true,
@@ -175,7 +173,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--progress" => o.progress = Some(val(&flag)?),
             "-q" | "--quiet" => o.progress = Some("quiet".into()),
             "--json" => o.json = true,
-            "--only-auto" => o.only_auto = true,
+            "--only-fuzzy" => o.only_fuzzy = true,
             "-y" | "--yes" => {}
             s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown option {}", s)),
             _ => o.positional.push(a.clone()),
@@ -355,9 +353,6 @@ fn save_provider(o: &Opts, cfg: &mut Config, p: &ProviderConfig) -> Result<PathB
     if let Some(b) = o.batch_size {
         cfg.batch_size = b;
     }
-    if o.no_comment {
-        cfg.add_comment = false;
-    }
     if o.no_fuzzy {
         cfg.mark_fuzzy = false;
     }
@@ -453,7 +448,6 @@ fn cmd_config(o: &Opts) -> Result<i32, String> {
         || o.url.is_some()
         || o.source_lang.is_some()
         || o.batch_size.is_some()
-        || o.no_comment
         || o.no_fuzzy
         || o.include_fuzzy;
     if sub == "set" || changing {
@@ -646,7 +640,6 @@ fn prepare(o: &Opts) -> Result<Prepared, String> {
             .clone()
             .unwrap_or_else(|| cfg.source_lang.clone()),
         include_fuzzy,
-        add_comment: !o.no_comment && cfg.add_comment,
         mark_fuzzy: !o.no_fuzzy && cfg.mark_fuzzy,
         batch_size: o.batch_size.unwrap_or(cfg.batch_size),
         limit: o.limit,
@@ -691,8 +684,7 @@ fn cmd_check(o: &Opts) -> Result<i32, String> {
                 if e.obsolete || e.is_header() || e.is_untranslated() {
                     continue;
                 }
-                let auto = e.comment_lines.iter().any(|c| crate::is_auto_comment(c));
-                if o.only_auto && !auto {
+                if o.only_fuzzy && !e.is_fuzzy() {
                     continue;
                 }
                 checked += 1;

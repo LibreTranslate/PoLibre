@@ -25,7 +25,6 @@ pub struct JobSettings {
     pub summary: String,
     pub source_lang: String,
     pub include_fuzzy: bool,
-    pub add_comment: bool,
     /// Mark machine translations fuzzy, so they need review before use.
     pub mark_fuzzy: bool,
     /// 0 = provider default
@@ -59,7 +58,6 @@ impl Default for JobSettings {
             summary: String::new(),
             source_lang: "en".into(),
             include_fuzzy: false,
-            add_comment: true,
             mark_fuzzy: true,
             batch_size: 0,
             limit: None,
@@ -175,7 +173,6 @@ struct Ctx<'a> {
     tx: &'a Sender<Event>,
     cancel: &'a Cancel,
     sources: SourceCache,
-    comment: Option<String>,
 }
 
 impl Ctx<'_> {
@@ -238,21 +235,19 @@ pub fn run(
 ) -> Summary {
     let start = Instant::now();
     let mut summary = Summary::default();
-    let comment = auto_note(&provider, &settings);
     let mut ctx = Ctx {
         provider: &provider,
         settings: &settings,
         tx: &tx,
         cancel: &cancel,
         sources: SourceCache::default(),
-        comment,
     };
     let _guard = install_sinks(&tx, settings.debug);
     if settings.debug {
         ctx.debug("Run settings", || {
             let key = if provider.api_key.is_empty() { "(none)".to_string() } else { providers::mask(&provider.api_key) };
             let mut b = format!(
-                "Service: {}\nModel: {}\nServer: {}\nAPI key: {}\nSource language: {}\nStrings per request: {}\nLimit: {}\nPreview only: {}\nRedo fuzzy entries: {}\nReview note: {}\nRetry rejected: {}\nSource code folder: {}\nCode lines around each reference: {}\nGlossary file: {}\n\nLanguages:\n",
+                "Service: {}\nModel: {}\nServer: {}\nAPI key: {}\nSource language: {}\nStrings per request: {}\nLimit: {}\nPreview only: {}\nRedo fuzzy entries: {}\nRetry rejected: {}\nSource code folder: {}\nCode lines around each reference: {}\nGlossary file: {}\n\nLanguages:\n",
                 provider.kind.id(),
                 if provider.model.is_empty() { "(service default)" } else { &provider.model },
                 if provider.url.is_empty() { "(n/a)" } else { &provider.url },
@@ -262,7 +257,6 @@ pub fn run(
                 settings.limit.map(|l| l.to_string()).unwrap_or_else(|| "none".into()),
                 settings.dry_run,
                 settings.include_fuzzy,
-                ctx.comment.as_deref().unwrap_or("(off)"),
                 settings.retry_rejected,
                 settings.source_root.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".into()),
                 settings.context_lines,
@@ -453,11 +447,7 @@ pub fn run(
                         Ok(forms) => {
                             if let Item::Entry(e) = &mut po.items[w.idx] {
                                 let shown = forms.clone();
-                                e.set_translation(
-                                    forms,
-                                    ctx.comment.clone(),
-                                    ctx.settings.mark_fuzzy,
-                                );
+                                e.set_translation(forms, ctx.settings.mark_fuzzy);
                                 changed = true;
                                 file_translated += 1;
                                 summary.translated += 1;
@@ -503,18 +493,6 @@ pub fn run(
     summary.elapsed = start.elapsed();
     ctx.send(Event::Finished(summary.clone()));
     summary
-}
-
-/// The "Translated by <model> on <date>" note for new translations, if enabled.
-pub fn auto_note(provider: &ProviderConfig, settings: &JobSettings) -> Option<String> {
-    settings.add_comment.then(|| {
-        let by = if provider.kind.is_llm() && !provider.model.is_empty() {
-            provider.model.as_str()
-        } else {
-            provider.kind.id()
-        };
-        crate::auto_comment(by)
-    })
 }
 
 /// A translation for display, with plural forms told apart (joining them
@@ -584,7 +562,6 @@ pub fn suggest(
         tx,
         cancel,
         sources: SourceCache::default(),
-        comment: None,
     };
     let work = [Work::from_entry(0, entry)];
     let results = if provider.kind.is_llm() {

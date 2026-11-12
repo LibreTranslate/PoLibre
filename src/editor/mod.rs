@@ -85,8 +85,6 @@ pub struct Suggestion {
     pub idx: usize,
     pub msgid: String,
     pub result: Result<Vec<String>, String>,
-    /// The "Translated by …" note to put on the entry (None removes it).
-    pub note: Option<String>,
 }
 
 pub struct Editor {
@@ -537,9 +535,7 @@ impl Editor {
         }
         match s.result {
             Ok(forms) => {
-                e.set_manual(forms);
-                e.set_needs_review(true);
-                e.set_auto_note(s.note);
+                e.set_translation(forms, true);
                 self.mark_changed(idx);
             }
             Err(why) => {
@@ -1727,9 +1723,9 @@ mod tests {
         assert!(ed.wants_suggestion(&path, a));
         ed.apply(a, Action::CancelSuggest);
         assert!(!ed.wants_suggestion(&path, a) && !ed.busy());
-        ed.suggested(Suggestion { path: path.clone(), idx: a, msgid: "One".into(), result: Err("cancelled".into()), note: None });
+        ed.suggested(Suggestion { path: path.clone(), idx: a, msgid: "One".into(), result: Err("cancelled".into()) });
         assert!(ed.suggest_errors.is_empty(), "no error shown for a cancelled suggestion");
-        ed.suggested(Suggestion { path: path.clone(), idx: a, msgid: "One".into(), result: Ok(vec!["Uno".into()]), note: None });
+        ed.suggested(Suggestion { path: path.clone(), idx: a, msgid: "One".into(), result: Ok(vec!["Uno".into()]) });
         assert!(ed.entry(a).is_untranslated());
         // Esc on the current string cancels its suggestion.
         ed.suggest_job(b);
@@ -1756,15 +1752,11 @@ mod tests {
             idx: a,
             msgid: "One".into(),
             result: Ok(vec!["Uno".into()]),
-            note: Some("Translated by libretranslate on 2026-11-11, needs review".into()),
         });
         assert!(!ed.busy());
         assert_eq!(ed.entry(a).msgstr, vec!["Uno"]);
         assert!(ed.entry(a).is_fuzzy(), "a suggestion needs review");
-        assert_eq!(
-            ed.entry(a).auto_note(),
-            Some("Translated by libretranslate on 2026-11-11, needs review")
-        );
+        assert_eq!(ed.entry(a).auto_note(), None, "no machine-translation note");
         assert!(ed.dirty());
         // A failure is reported on the entry; a stale answer is ignored.
         ed.suggest_job(b);
@@ -1773,7 +1765,6 @@ mod tests {
             idx: b,
             msgid: "Two".into(),
             result: Err("offline".into()),
-            note: Some("Translated by libretranslate on 2026-11-11, needs review".into()),
         });
         assert_eq!(
             ed.suggest_errors.get(&b).map(String::as_str),
@@ -1784,7 +1775,6 @@ mod tests {
             idx: b,
             msgid: "Two".into(),
             result: Ok(vec!["Due".into()]),
-            note: Some("Translated by libretranslate on 2026-11-11, needs review".into()),
         });
         assert!(ed.entry(b).is_untranslated(), "not requested any more");
         ed.suggest_job(b);
@@ -1794,7 +1784,6 @@ mod tests {
             idx: b,
             msgid: "Two".into(),
             result: Ok(vec!["Due".into()]),
-            note: Some("Translated by libretranslate on 2026-11-11, needs review".into()),
         });
         assert!(ed.entry(b).is_untranslated(), "file reloaded meanwhile");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();

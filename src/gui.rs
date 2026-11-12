@@ -300,8 +300,6 @@ struct LogLine {
     entry: Option<ResultRef>,
     /// The proposed translation (plural forms separately); empty if rejected.
     forms: Vec<String>,
-    /// "Translated by <model>", written with it when marked for review.
-    note: Option<String>,
     /// Why writing it to the file didn't work.
     problem: Option<String>,
 }
@@ -325,8 +323,6 @@ struct Job {
     current: Vec<String>,
     started: Instant,
     eta: Option<f32>,
-    /// The note for this run's translations when they're marked for review.
-    note: Option<String>,
     finished: Option<Summary>,
 }
 
@@ -723,7 +719,6 @@ impl App {
         }
         let settings = self.job_settings(proj);
         let provider = self.provider_config();
-        let note = engine::auto_note(&provider, &settings);
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let c2 = cancel.clone();
@@ -745,7 +740,6 @@ impl App {
             current: vec![],
             started: Instant::now(),
             eta: None,
-            note,
             finished: None,
         });
     }
@@ -764,7 +758,6 @@ impl App {
             source_lang: self.source_lang.clone(),
             include_fuzzy: self.include_fuzzy,
             // The app shows translations first; nothing is written by a run.
-            add_comment: true,
             mark_fuzzy: true,
             batch_size: self.batch_size,
             limit: if self.limit > 0 {
@@ -798,7 +791,6 @@ impl App {
         let Some(proj) = &self.project else { return };
         let settings = self.job_settings(proj);
         let provider = self.provider_config();
-        let note = engine::auto_note(&provider, &settings);
         let bg = self.bg_tx.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.suggest_jobs.push((job.path.clone(), job.idx, cancel.clone()));
@@ -836,7 +828,6 @@ impl App {
                 idx: job.idx,
                 msgid: job.entry.msgid,
                 result,
-                note,
             }));
         });
     }
@@ -1062,7 +1053,6 @@ impl App {
                     b: String::new(),
                     entry: None,
                     forms: vec![],
-                    note: None,
                     problem: None,
                 };
                 let entry = |code: &str, path: PathBuf, msgctxt: Option<String>, msgid: &str| {
@@ -1113,7 +1103,6 @@ impl App {
                             a: msgid,
                             b: msgstr,
                             forms,
-                            note: job.note.clone(),
                             problem: None,
                         });
                     }
@@ -1133,7 +1122,6 @@ impl App {
                             a: msgid,
                             b: format!("Not used: {}", reason),
                             forms: vec![],
-                            note: None,
                             problem: None,
                         });
                     }
@@ -2427,7 +2415,7 @@ impl App {
     }
 
     /// Writes the proposals at `rows` to their files: as reviewed, or (if
-    /// `review`) marked as needing review with the model note. Saved rows leave
+    /// `review`) marked as needing review. Saved rows leave
     /// the list; the others say why they weren't saved.
     fn save_proposals(&mut self, rows: &[usize], review: bool) {
         let mut by_file: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
@@ -2446,9 +2434,7 @@ impl App {
                     (r.msgctxt.clone(), r.msgid.clone(), l.forms.clone())
                 })
                 .collect();
-            // Every row of a run has the same note.
-            let note = self.log[idx[0]].note.clone();
-            match crate::po::PoFile::write_proposals(path, &items, review, note.as_deref()) {
+            match crate::po::PoFile::write_proposals(path, &items, review) {
                 Ok(outcome) => {
                     for (&i, w) in idx.iter().zip(outcome) {
                         match w {

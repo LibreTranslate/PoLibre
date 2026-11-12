@@ -27,16 +27,11 @@ mod project;
 mod providers;
 mod validate;
 
-/// Translator comment added to every machine-filled entry, naming the model
-/// (or service, for LibreTranslate) that produced it.
-pub fn auto_comment(by: &str) -> String {
-    format!("Translated by {}", by)
-}
-
-/// Whether a comment line was written by this tool. Also recognizes the older
-/// wordings ("# AutoTranslate: ...", from before the rename to PoLibre, and
-/// "Translated by <model> on <date>[, needs review]") so those notes are
-/// still replaced and checked.
+/// Whether a comment line is a "Translated by …" note that earlier versions
+/// of this tool wrote. They're removed when an entry is translated again or
+/// approved. Covers every wording used: "# Translated by <model>",
+/// "# Translated by <model> on <date>[, needs review]" and, from before the
+/// rename to PoLibre, "# AutoTranslate: ...".
 pub fn is_auto_comment(line: &str) -> bool {
     let Some(c) = line.strip_prefix("# ") else {
         return false;
@@ -72,10 +67,8 @@ pub fn is_auto_comment(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn auto_comment_roundtrip() {
-        let c = format!("# {}", super::auto_comment("claude-opus-5-5"));
-        assert_eq!(c, "# Translated by claude-opus-5-5");
-        assert!(super::is_auto_comment(&c), "{}", c);
+    fn old_notes_are_recognized() {
+        assert!(super::is_auto_comment("# Translated by claude-opus-5-5"));
         assert!(super::is_auto_comment(
             "# Translated by opus on 2026-11-11, needs review"
         ));

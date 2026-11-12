@@ -47,7 +47,7 @@ It also works from the command line:
 polibre scan path/to/project                      # languages and missing strings
 polibre translate . -l it,de -p libretranslate -k KEY --dry-run
 polibre translate . -p anthropic -m claude-opus-5-5 --limit 20
-polibre check . -l it --only-auto                 # re-check PoLibre's translations
+polibre check . -l it --only-fuzzy                # check translations needing review
 polibre translate . --no-config -p anthropic -m claude-opus-5-5 --report report.json
 ```
 

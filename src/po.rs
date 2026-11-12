@@ -32,8 +32,6 @@ pub struct Entry {
 
     /// Set when this entry must be re-rendered.
     pub modified: bool,
-    /// Translator comment to add when re-rendering.
-    pub new_comment: Option<String>,
 }
 
 impl Entry {
@@ -54,9 +52,10 @@ impl Entry {
         self.is_untranslated() || (include_fuzzy && self.is_fuzzy())
     }
 
-    /// Fill this entry with a machine translation, optionally mark it fuzzy
-    /// (needs review) and attach a translator comment.
-    pub fn set_translation(&mut self, forms: Vec<String>, comment: Option<String>, fuzzy: bool) {
+    /// Fill this entry with a machine translation, optionally marked fuzzy
+    /// (needs review). An old "Translated by …" note no longer applies, so
+    /// it's removed.
+    pub fn set_translation(&mut self, forms: Vec<String>, fuzzy: bool) {
         self.msgstr = forms;
         if fuzzy {
             if !self.is_fuzzy() {
@@ -67,7 +66,7 @@ impl Entry {
             self.flags.retain(|f| f != "fuzzy");
             self.comment_lines.retain(|l| !l.starts_with("#|"));
         }
-        self.new_comment = comment;
+        self.comment_lines.retain(|l| !crate::is_auto_comment(l));
         self.modified = true;
     }
 
@@ -150,23 +149,6 @@ impl Entry {
         self.modified = true;
     }
 
-    /// Replace PoLibre's "Translated by …" note (none removes it).
-    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
-    pub fn set_auto_note(&mut self, note: Option<String>) {
-        self.comment_lines.retain(|l| !crate::is_auto_comment(l));
-        if let Some(n) = note {
-            // After the other translator comments, as when rendering.
-            let at = self
-                .comment_lines
-                .iter()
-                .take_while(|l| is_translator_comment(l))
-                .count();
-            self.comment_lines.insert(at, format!("# {}", n));
-        }
-        self.new_comment = None;
-        self.modified = true;
-    }
-
     /// Replace the translation with text typed by a person.
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     pub fn set_manual(&mut self, forms: Vec<String>) {
@@ -187,7 +169,6 @@ impl Entry {
             self.flags.retain(|f| f != "fuzzy");
             self.comment_lines
                 .retain(|l| !crate::is_auto_comment(l) && !l.starts_with("#|"));
-            self.new_comment = None;
         }
         self.modified = true;
     }
@@ -212,16 +193,7 @@ impl Entry {
             .iter()
             .take_while(|l| is_translator_comment(l))
             .count();
-        for l in &self.comment_lines[..n_translator] {
-            // Replace a previous machine-translation note instead of stacking them.
-            if self.new_comment.is_some() && crate::is_auto_comment(l) {
-                continue;
-            }
-            comments.push(l.clone());
-        }
-        if let Some(c) = &self.new_comment {
-            comments.push(format!("# {}", c));
-        }
+        comments.extend(self.comment_lines[..n_translator].iter().cloned());
         for l in &self.comment_lines[n_translator..] {
             if l.starts_with("#,") {
                 if !flags_done {
@@ -292,15 +264,14 @@ pub struct PoFile {
 
 impl PoFile {
     /// Writes proposed translations into the file at `path`, each found by
-    /// (msgctxt, msgid). `review`: mark them as needing review (fuzzy) with
-    /// `note`; otherwise they're written as reviewed, without a note. An entry
+    /// (msgctxt, msgid). `review`: mark them as needing review (fuzzy);
+    /// otherwise they're written as reviewed. An entry
     /// that someone translated and reviewed meanwhile isn't overwritten.
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     pub fn write_proposals(
         path: &Path,
         items: &[(Option<String>, String, Vec<String>)],
         review: bool,
-        note: Option<&str>,
     ) -> io::Result<Vec<Written>> {
         let mut po = Self::load(path)?;
         let mut out = Vec::new();
@@ -312,9 +283,7 @@ impl PoFile {
                 None => Written::Missing,
                 Some(e) if !e.is_untranslated() && !e.is_fuzzy() => Written::Taken,
                 Some(e) => {
-                    e.set_translation(forms.clone(), None, review);
-                    // One note at most: the new one, or none for a reviewed translation.
-                    e.set_auto_note(if review { note.map(String::from) } else { None });
+                    e.set_translation(forms.clone(), review);
                     Written::Ok
                 }
             });
@@ -709,9 +678,10 @@ msgstr[1] ""
     fn modify_entry() {
         let mut po = PoFile::parse(SAMPLE);
         let e = po.entries_mut().nth(2).unwrap();
-        e.set_translation(vec!["Riavvio necessario. Riavviare WebODM per disabilitare completamente %(plugin)s e tutto il resto".into()], Some(crate::auto_comment("opus")), true);
+        e.set_translation(vec!["Riavvio necessario. Riavviare WebODM per disabilitare completamente %(plugin)s e tutto il resto".into()], true);
         let out = po.render();
-        assert!(out.contains("# Translated by opus\n#: app/a.py:1 app/b.py:2\n#, fuzzy, python-format\nmsgid"));
+        assert!(out.contains("\n\n#: app/a.py:1 app/b.py:2\n#, fuzzy, python-format\nmsgid"), "{}", out);
+        assert!(!out.contains("Translated by"), "{}", out);
         let re = PoFile::parse(&out);
         let e = re.entries().nth(2).unwrap();
         assert!(e.is_fuzzy());
@@ -793,48 +763,26 @@ mod corpus_tests {
         )
         .unwrap();
         let item = |c: Option<&str>, id: &str, t: &str| (c.map(String::from), id.to_string(), vec![t.to_string()]);
-        // Accepted: reviewed, no note (an old note goes too).
-        let r = PoFile::write_proposals(&path, &[item(None, "Save", "Salva"), item(None, "Close", "Chiudi")], false, Some("ignored")).unwrap();
+        // Accepted: reviewed (an old note goes too).
+        let r = PoFile::write_proposals(&path, &[item(None, "Save", "Salva"), item(None, "Close", "Chiudi")], false).unwrap();
         assert_eq!(r, vec![Written::Ok, Written::Ok]);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("\n\nmsgid \"Save\"\nmsgstr \"Salva\"\n"), "{}", text);
         assert!(text.contains("\n\nmsgid \"Close\"\nmsgstr \"Chiudi\"\n"), "{}", text);
         assert!(!text.contains("Translated by"), "{}", text);
-        // For review: fuzzy with the note. Missing and reviewed entries are reported, not touched.
+        // For review: fuzzy, no note. Missing and reviewed entries are reported, not touched.
         let r = PoFile::write_proposals(
             &path,
             &[item(Some("menu"), "Open", "Apri"), item(None, "Gone", "Via"), item(None, "Done", "Finito")],
             true,
-            Some("Translated by opus"),
         )
         .unwrap();
         assert_eq!(r, vec![Written::Ok, Written::Missing, Written::Taken]);
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("# Translated by opus\n#, fuzzy\nmsgctxt \"menu\"\nmsgid \"Open\"\nmsgstr \"Apri\""), "{}", text);
+        assert!(text.contains("\n\n#, fuzzy\nmsgctxt \"menu\"\nmsgid \"Open\"\nmsgstr \"Apri\""), "{}", text);
+        assert!(!text.contains("Translated by"), "{}", text);
         assert!(text.contains("msgid \"Done\"\nmsgstr \"Fatto\""), "{}", text);
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn auto_note_is_replaced_or_removed() {
-        let text = "msgid \"\"\nmsgstr \"\"\n\n# keep me\n# Translated by opus on 2026-11-11, needs review\n#: a.py:1\n#, fuzzy\nmsgid \"Hi\"\nmsgstr \"Ciao\"\n";
-        let mut po = PoFile::parse(text);
-        let e = po.entries_mut().nth(1).unwrap();
-        e.set_auto_note(Some(
-            "Translated by libretranslate on 2026-11-12, needs review".into(),
-        ));
-        assert_eq!(
-            e.auto_note(),
-            Some("Translated by libretranslate on 2026-11-12, needs review")
-        );
-        assert!(po.render().contains("# keep me\n# Translated by libretranslate on 2026-11-12, needs review\n#: a.py:1\n#, fuzzy\nmsgid"), "{}", po.render());
-        po.entries_mut().nth(1).unwrap().set_auto_note(None);
-        assert!(
-            po.render()
-                .contains("# keep me\n#: a.py:1\n#, fuzzy\nmsgid"),
-            "{}",
-            po.render()
-        );
     }
 
     /// Every .po file under $POLIBRE_CORPUS must round-trip byte-for-byte.
