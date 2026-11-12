@@ -2,7 +2,7 @@
 
 <img src="assets/icon.svg" width="72" alt="PoLibre" align="right">
 
-A free and open source `.po` editor for machine assisted translation with built-in support for
+Your free and open source `.po` editor for machine assisted translation with built-in support for
 [LibreTranslate](https://github.com/LibreTranslate/LibreTranslate) and both offline/online LLMs (Claude, Gemini, Ollama). 
 
 <img alt="PoLibre Screenshot" src="https://github.com/user-attachments/assets/2dfdca01-19c1-43b5-81f2-cc1f76d4137c" />
