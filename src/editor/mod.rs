@@ -61,7 +61,6 @@ enum Show {
 /// What the editor asks the window to do.
 pub enum Request {
     None,
-    Close,
     SwitchFile(usize),
     Saved,
     /// Ask the translation service for one string; answer with [`Editor::suggested`].
@@ -743,15 +742,6 @@ impl Editor {
                 self.page = 0;
                 self.keep.clear();
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .button("Close")
-                    .on_hover_text(format!("Close the {} translations", self.name))
-                    .clicked()
-                {
-                    req = Request::Close;
-                }
-            });
         });
 
         // Save bar

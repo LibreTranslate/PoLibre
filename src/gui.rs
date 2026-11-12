@@ -1264,7 +1264,6 @@ impl App {
         match ed.ui(ui) {
             editor::Request::Suggest(job) => self.suggest(job),
             editor::Request::None => {}
-            editor::Request::Close => self.request(Pending::CloseEditor),
             editor::Request::SwitchFile(i) => self.request(Pending::SwitchFile(i)),
             editor::Request::Saved => {
                 let sel = self.selected.clone();
