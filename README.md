@@ -38,7 +38,7 @@ cargo build --release --no-default-features  # command line only
 
 ## Usage
 
-Run `polibre` to open the app: pick a project folder and a translation service, tick the
+Run `polibre` to open the app: pick a project folder and a translation service, select the
 languages and press **Translate**. Click **Edit** on a language to review its translations.
 
 It also works from the command line:
