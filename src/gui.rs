@@ -1781,8 +1781,81 @@ impl App {
             return;
         }
         ui.add_space(2.0);
+        if ui
+            .checkbox(&mut self.include_fuzzy, "Redo fuzzy translations")
+            .on_hover_text("Translate again the strings marked fuzzy (waiting for review), replacing their current translation")
+            .changed()
+        {
+            self.scan();
+        }
+        ui.add_space(4.0);
+        ui.label("Language of the original text");
+        egui::ComboBox::from_id_salt("srclang")
+            .width(ui.available_width())
+            .selected_text(format!(
+                "{} ({})",
+                langs::name(&self.source_lang),
+                self.source_lang
+            ))
+            .show_ui(ui, |ui| {
+                let mut all: Vec<_> = langs::NAMES
+                    .iter()
+                    .filter(|(c, _)| !c.contains('_'))
+                    .collect();
+                all.sort_by_key(|(_, n)| *n);
+                for (code, name) in all {
+                    ui.selectable_value(
+                        &mut self.source_lang,
+                        code.to_string(),
+                        format!("{} ({})", name, code),
+                    );
+                }
+            });
+        ui.add_space(2.0);
+        egui::Grid::new("numbers")
+            .num_columns(2)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Strings per request");
+                ui.add(
+                    egui::DragValue::new(&mut self.batch_size)
+                        .range(0..=200)
+                        .custom_formatter(|v, _| {
+                            if v == 0.0 {
+                                "Automatic".into()
+                            } else {
+                                format!("{}", v)
+                            }
+                        }),
+                );
+                ui.end_row();
+                ui.label("Translate at most");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.limit)
+                            .range(0..=100000)
+                            .custom_formatter(|v, _| {
+                                if v == 0.0 {
+                                    "All".into()
+                                } else {
+                                    format!("{}", v)
+                                }
+                            })
+                            .custom_parser(|s| {
+                                if s.trim().eq_ignore_ascii_case("all") {
+                                    Some(0.0)
+                                } else {
+                                    s.trim().parse().ok()
+                                }
+                            }),
+                    );
+                    ui.label("strings");
+                });
+                ui.end_row();
+            });
         let is_llm = self.provider.is_llm();
         if is_llm {
+            ui.add_space(8.0);
             ui.label("Source code folder");
             let mut browse = false;
             ui.horizontal(|ui| {
@@ -1828,80 +1901,7 @@ impl App {
                 self.browse(Pick::Glossary);
             }
             help(ui, "A CSV, TSV or .po file of preferred terms. Terms already translated in the project are always used.");
-            ui.add_space(4.0);
         }
-        ui.label("Language of the original text");
-        egui::ComboBox::from_id_salt("srclang")
-            .width(ui.available_width())
-            .selected_text(format!(
-                "{} ({})",
-                langs::name(&self.source_lang),
-                self.source_lang
-            ))
-            .show_ui(ui, |ui| {
-                let mut all: Vec<_> = langs::NAMES
-                    .iter()
-                    .filter(|(c, _)| !c.contains('_'))
-                    .collect();
-                all.sort_by_key(|(_, n)| *n);
-                for (code, name) in all {
-                    ui.selectable_value(
-                        &mut self.source_lang,
-                        code.to_string(),
-                        format!("{} ({})", name, code),
-                    );
-                }
-            });
-        ui.add_space(4.0);
-        if ui
-            .checkbox(&mut self.include_fuzzy, "Redo fuzzy translations")
-            .on_hover_text("Translate again the strings marked fuzzy (waiting for review), replacing their current translation")
-            .changed()
-        {
-            self.scan();
-        }
-        ui.add_space(2.0);
-        egui::Grid::new("numbers")
-            .num_columns(2)
-            .spacing([10.0, 6.0])
-            .show(ui, |ui| {
-                ui.label("Strings per request");
-                ui.add(
-                    egui::DragValue::new(&mut self.batch_size)
-                        .range(0..=200)
-                        .custom_formatter(|v, _| {
-                            if v == 0.0 {
-                                "Automatic".into()
-                            } else {
-                                format!("{}", v)
-                            }
-                        }),
-                );
-                ui.end_row();
-                ui.label("Translate at most");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut self.limit)
-                            .range(0..=100000)
-                            .custom_formatter(|v, _| {
-                                if v == 0.0 {
-                                    "All".into()
-                                } else {
-                                    format!("{}", v)
-                                }
-                            })
-                            .custom_parser(|s| {
-                                if s.trim().eq_ignore_ascii_case("all") {
-                                    Some(0.0)
-                                } else {
-                                    s.trim().parse().ok()
-                                }
-                            }),
-                    );
-                    ui.label("strings");
-                });
-                ui.end_row();
-            });
     }
 
     fn languages_panel(&mut self, ui: &mut egui::Ui) {
@@ -2099,16 +2099,21 @@ impl App {
                                             });
                                         };
                                         let fz = l.fuzzy();
-                                        if !self.include_fuzzy {
-                                            cell(ui, fuzzy_w, &mut |ui| {
+                                        // Icon first, left-aligned, so the icons form a column.
+                                        cell(ui, fuzzy_w, &mut |ui| {
+                                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                                 if fz > 0 {
-                                                    let tip = format!("{} translations need review", thousands(fz));
-                                                    ui.label(RichText::new(thousands(fz)).small().weak()).on_hover_text(&tip);
+                                                    let tip = if fz == 1 {
+                                                        "1 translation needs review".to_string()
+                                                    } else {
+                                                        format!("{} translations need review", thousands(fz))
+                                                    };
                                                     ui.label(icon(LogKind::Warn).small()).on_hover_text(&tip);
+                                                    ui.label(RichText::new(thousands(fz)).small().weak()).on_hover_text(&tip);
                                                 }
                                             });
-                                            ui.add_space(6.0);
-                                        }
+                                        });
+                                        ui.add_space(6.0);
                                         let t = if supported == Some(false) {
                                             "Not available".to_string()
                                         } else if u == 0 {
