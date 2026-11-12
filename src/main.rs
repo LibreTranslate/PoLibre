@@ -28,19 +28,15 @@ mod providers;
 mod validate;
 
 /// Translator comment added to every machine-filled entry, naming the model
-/// (or service, for LibreTranslate) that produced it. `review` adds
-/// ", needs review" (used when the entry is also marked fuzzy).
-pub fn auto_comment(by: &str, date: &str, review: bool) -> String {
-    format!(
-        "Translated by {} on {}{}",
-        by,
-        date,
-        if review { ", needs review" } else { "" }
-    )
+/// (or service, for LibreTranslate) that produced it.
+pub fn auto_comment(by: &str) -> String {
+    format!("Translated by {}", by)
 }
 
 /// Whether a comment line was written by this tool. Also recognizes the older
-/// "# AutoTranslate: ..." wording (from before the rename to PoLibre) so those notes are still replaced and checked.
+/// wordings ("# AutoTranslate: ...", from before the rename to PoLibre, and
+/// "Translated by <model> on <date>[, needs review]") so those notes are
+/// still replaced and checked.
 pub fn is_auto_comment(line: &str) -> bool {
     let Some(c) = line.strip_prefix("# ") else {
         return false;
@@ -48,10 +44,14 @@ pub fn is_auto_comment(line: &str) -> bool {
     if c.starts_with("AutoTranslate:") {
         return true;
     }
-    // "Translated by <model> on YYYY-MM-DD[, needs review]"
     let Some(rest) = c.strip_prefix("Translated by ") else {
         return false;
     };
+    // "Translated by <model>": model ids and service names have no spaces.
+    if !rest.is_empty() && !rest.contains(char::is_whitespace) {
+        return true;
+    }
+    // Older: "Translated by <model> on YYYY-MM-DD[, needs review]"
     let rest = rest.strip_suffix(", needs review").unwrap_or(rest);
     let Some((by, date)) = rest.rsplit_once(" on ") else {
         return false;
@@ -73,13 +73,12 @@ pub fn is_auto_comment(line: &str) -> bool {
 mod tests {
     #[test]
     fn auto_comment_roundtrip() {
-        for review in [true, false] {
-            let c = format!(
-                "# {}",
-                super::auto_comment("claude-opus-5-5", "2026-11-11", review)
-            );
-            assert!(super::is_auto_comment(&c), "{}", c);
-        }
+        let c = format!("# {}", super::auto_comment("claude-opus-5-5"));
+        assert_eq!(c, "# Translated by claude-opus-5-5");
+        assert!(super::is_auto_comment(&c), "{}", c);
+        assert!(super::is_auto_comment(
+            "# Translated by opus on 2026-11-11, needs review"
+        ));
         assert!(super::is_auto_comment(
             "# AutoTranslate: opus, needs review"
         ));

@@ -36,13 +36,7 @@ impl Reference {
                 if e.obsolete || e.is_header() || e.is_untranslated() {
                     continue;
                 }
-                let text = e
-                    .msgstr
-                    .iter()
-                    .filter(|s| !s.is_empty())
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" | ");
+                let text = crate::engine::show_forms(&e.msgstr, "  ·  ");
                 by_key
                     .entry((e.msgctxt.clone(), e.msgid.clone()))
                     .or_insert(Shown {

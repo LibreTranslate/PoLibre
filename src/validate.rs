@@ -107,6 +107,7 @@ pub fn check_one(
         return Err(format!("contains a control character (U+{:04X})", c as u32));
     }
     garbage(src_core, &core)?;
+    stray_symbols(src_core, &core)?;
 
     // Newline structure must be preserved.
     let n_src = src_core.matches('\n').count();
@@ -554,6 +555,81 @@ fn html_tag(s: &str) -> Option<(String, usize)> {
 }
 
 /// Typical LLM chatter / formatting debris that must never end up in a .po file.
+/// Symbols that ordinary text rarely needs; when one shows up in a
+/// translation but not in the original, the output is usually malformed:
+/// alternatives joined with "|" ("voce | voci"), Markdown ("**Salva**"),
+/// escapes, tags like "[IT]", decorations, or the model's formatting.
+const STRAY_SYMBOLS: &[char] = &[
+    '|', '¦', '‖', '\\', '`', '*', '~', '^', '#', '=', '_', '@', '[', ']', '•', '→', '⇒', '►', '§', '¶', '¤',
+];
+
+/// Emoji and pictographs.
+fn is_pictograph(c: char) -> bool {
+    matches!(c as u32, 0x1F300..=0x1FAFF | 0x2600..=0x27BF | 0x1F000..=0x1F2FF)
+}
+
+/// The text without its placeholders, tags, URLs and code identifiers (which
+/// are checked separately and may legitimately contain any symbol).
+fn plain_text(s: &str) -> String {
+    let mut t = s.to_string();
+    let mut tokens: Vec<String> = placeholders(s, &[])
+        .into_iter()
+        .filter_map(|p| p.split_once(':').map(|(_, v)| v.to_string()))
+        .collect();
+    tokens.sort_by_key(|x| std::cmp::Reverse(x.len()));
+    for tok in tokens {
+        t = t.replace(&tok, " ");
+    }
+    // printf-style and named placeholders even without a format flag.
+    let mut out = String::new();
+    let mut chars = t.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' && chars.peek() == Some(&'(') {
+            for d in chars.by_ref() {
+                if d == ')' {
+                    break;
+                }
+            }
+            chars.next(); // the conversion letter
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn stray_symbols(src_raw: &str, out: &str) -> Result<(), String> {
+    let (src, out) = (plain_text(src_raw), plain_text(out));
+    // Present in the original (anywhere, e.g. in "color_map"), or an arrow
+    // standing for the original's ">" ("Restart > From DEM").
+    let allowed = |c: char| src_raw.contains(c) || (matches!(c, '→' | '⇒' | '►') && src_raw.contains('>'));
+    if let Some(c) = out
+        .chars()
+        .find(|c| (STRAY_SYMBOLS.contains(c) || is_pictograph(*c)) && !allowed(*c))
+    {
+        return Err(if matches!(c, '|' | '¦' | '‖') {
+            format!(
+                "contains “{}”, which isn't in the original text; it looks like several alternatives joined together, but only one translation is wanted",
+                c
+            )
+        } else {
+            format!("contains “{}”, which isn't in the original text", c)
+        });
+    }
+    // "voce / voci": words separated by a spaced slash the original doesn't have
+    // (a slash between numbers, as in "3 / 10", is fine).
+    if !src.contains('/') {
+        let chars: Vec<char> = out.chars().collect();
+        for w in chars.windows(5) {
+            if w[1] == ' ' && w[2] == '/' && w[3] == ' ' && w[0].is_alphabetic() && w[4].is_alphabetic() {
+                return Err("contains “ / ” between words, which isn't in the original text; it looks like alternatives, but only one translation is wanted".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn garbage(src: &str, out: &str) -> Result<(), String> {
     let lo = out.to_lowercase();
     let slo = src.to_lowercase();
@@ -869,7 +945,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad() {
+    fn stray_symbols_are_flagged() {
+        let f = py();
+        let e = check_one("entry", "voce | voci", &f, "it", None).unwrap_err();
+        assert!(e.contains("“|”") && e.contains("alternatives"), "{}", e);
+        assert!(check_one("entry", "voce / voci", &f, "it", None).is_err());
+        assert!(check_one("Save", "**Salva**", &f, "it", None).is_err());
+        assert!(check_one("Save", "Salva\\", &f, "it", None).is_err());
+        // Symbols the original has, or ordinary slashes, are fine.
+        assert!(check_one("Use | to separate values", "Usa | per separare i valori", &f, "it", None).is_ok());
+        assert!(check_one("and/or", "e/o", &f, "it", None).is_ok());
+        assert!(check_one("Save", "Salva", &f, "it", None).is_ok());
+        assert!(check_one("Save", "[IT] Salva", &f, "it", None).is_err());
+        assert!(check_one("Save", "Salva ✅", &f, "it", None).is_err());
+        assert!(check_one("Next", "→ Avanti", &f, "it", None).is_err());
+        // Slashes between numbers/placeholders, and symbols inside placeholders, are fine.
+        assert!(check_one("%(used)s of %(total)s used", "%(used)s / %(total)s käytetty", &f, "fi", None).is_ok());
+        assert!(check_one("Upload %(file_name)s", "Carica %(file_name)s", &f, "it", None).is_ok());
+        assert!(stray_symbols("Not a valid color_map value", "有効なcolor_mapの値ではない").is_ok());
+        assert!(stray_symbols("Press Restart > From DEM", "Premi Riavvia → Da DEM").is_ok());
+    }
+
+    #[test]
+        fn rejects_bad() {
         let f = py();
         assert!(check_one("Hello %(name)s", "Ciao", &f, "it", None).is_err());
         assert!(check_one("Hello %(name)s", "Ciao %(nome)s", &f, "it", None).is_err());

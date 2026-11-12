@@ -36,6 +36,8 @@ enum Action {
     /// Empty the translation to type a new one.
     Discard,
     Suggest,
+    /// Stop waiting for a suggestion (the window then cancels the request).
+    CancelSuggest,
     ToggleReview,
     /// Take a translation from the translation memory.
     Use(String),
@@ -374,6 +376,10 @@ impl Editor {
                 }
                 return;
             }
+            Action::CancelSuggest => {
+                self.suggesting.remove(&i);
+                return;
+            }
             Action::EditNote => {
                 let text = self.entry(i).translator_comments();
                 self.note_drafts.insert(i, text);
@@ -460,6 +466,10 @@ impl Editor {
             if let Some(c) = cur {
                 self.apply(c, Action::Suggest);
             }
+        } else if let Some(c) = cur.filter(|c| self.suggesting.contains(c)) {
+            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.apply(c, Action::CancelSuggest);
+            }
         }
     }
 
@@ -491,6 +501,12 @@ impl Editor {
     /// A suggestion is being fetched.
     pub fn busy(&self) -> bool {
         !self.suggesting.is_empty()
+    }
+
+    /// Whether the editor still waits for this suggestion; when it doesn't
+    /// (cancelled, or the file was switched or reloaded), the request is stopped.
+    pub fn wants_suggestion(&self, path: &std::path::Path, idx: usize) -> bool {
+        path == self.path() && self.suggesting.contains(&idx)
     }
 
     fn suggest_job(&mut self, i: usize) -> SuggestJob {
@@ -1126,7 +1142,7 @@ impl Editor {
                 forms.resize(n, String::new());
                 for (k, f) in forms.iter_mut().enumerate() {
                     if n > 1 {
-                        ui.label(RichText::new(format!("Form {}", k)).small().weak())
+                        ui.label(RichText::new(crate::engine::form_label(k, n)).small().weak())
                             .on_hover_text(format!(
                                 "Used when the plural rule “{}” gives {}",
                                 if plural_expr.is_empty() {
@@ -1212,8 +1228,15 @@ impl Editor {
                         }
                     }
                     if self.suggesting.contains(&i) {
+                        // The Suggest button turns into a stop button while waiting.
+                        if ui
+                            .add(super::stop_button(ui, "Cancel"))
+                            .on_hover_text("Stop getting a suggestion (Esc)")
+                            .clicked()
+                        {
+                            action = Some(Action::CancelSuggest);
+                        }
                         ui.spinner();
-                        ui.label(RichText::new("Getting a suggestion…").weak());
                     } else if ui
                         .button("Suggest")
                         .on_hover_text(format!(
@@ -1339,6 +1362,7 @@ fn memory_ui(ui: &mut egui::Ui, found: &[Match], msgid: &str, current: &str) -> 
 /// The PoLibre note without its date and review suffix:
 /// "Translated by opus on 2026-11-11, needs review" -> "Translated by opus".
 fn note_label(n: &str) -> &str {
+    // Older notes also carry a date and ", needs review".
     let n = n.trim_end_matches(", needs review");
     match n.rsplit_once(" on ") {
         Some((head, date)) if date.len() == 10 && date.as_bytes()[4] == b'-' => head,
@@ -1697,6 +1721,34 @@ mod tests {
         );
         ed.apply(a, Action::Use("Uno".into()));
         assert_eq!(ed.entry(a).msgstr, vec!["Uno"]);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn cancelling_a_suggestion() {
+        let path = temp_po("cancel", &[("One", "", false), ("Two", "", false)]);
+        let mut ed = Editor::open("it", "Italian", vec![path.clone()], 0, None).unwrap();
+        ed.show = Show::All;
+        let (a, b) = (ed.rows[0], ed.rows[1]);
+        // The Cancel button: no longer waited for, and a late answer is ignored.
+        ed.suggest_job(a);
+        assert!(ed.wants_suggestion(&path, a));
+        ed.apply(a, Action::CancelSuggest);
+        assert!(!ed.wants_suggestion(&path, a) && !ed.busy());
+        ed.suggested(Suggestion { path: path.clone(), idx: a, msgid: "One".into(), result: Err("cancelled".into()), note: None });
+        assert!(ed.suggest_errors.is_empty(), "no error shown for a cancelled suggestion");
+        ed.suggested(Suggestion { path: path.clone(), idx: a, msgid: "One".into(), result: Ok(vec!["Uno".into()]), note: None });
+        assert!(ed.entry(a).is_untranslated());
+        // Esc on the current string cancels its suggestion.
+        ed.suggest_job(b);
+        ed.current = Some(b);
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut ed, &[KeyboardShortcut::new(Modifiers::NONE, Key::Escape)]);
+        assert!(!ed.wants_suggestion(&path, b));
+        // Reloading the file drops every pending suggestion.
+        ed.suggest_job(a);
+        ed.load().unwrap();
+        assert!(!ed.wants_suggestion(&path, a));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

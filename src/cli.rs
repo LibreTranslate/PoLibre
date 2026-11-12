@@ -56,7 +56,7 @@ TRANSLATE OPTIONS:
         --batch-size N      Entries per request (default: 20 LLM, 25 LibreTranslate)
         --limit N           Translate at most N entries in this run
         --include-fuzzy     Also re-translate entries already marked fuzzy
-        --no-comment        Don't add the "# Translated by <model> ..." comment
+        --no-comment        Don't add the "# Translated by <model>" comment
         --no-fuzzy          Don't mark translations fuzzy (they won't need review)
         --no-retry          Don't re-ask the LLM about translations that fail validation
         --debug             Print every request, model reply and check to stderr [POLIBRE_DEBUG]
@@ -70,7 +70,7 @@ TRANSLATE OPTIONS:
 
 Machine translations are marked "#, fuzzy" (so they are not used until a
 human reviews them; --no-fuzzy turns this off) and get a
-"# Translated by <model> on <date>, needs review" comment.
+"# Translated by <model>" comment.
 
 EXIT CODES: 0 success, 1 error, 2 bad usage, 3 rejected entries (--fail-on-reject),
             130 interrupted
@@ -655,6 +655,7 @@ fn prepare(o: &Opts) -> Result<Prepared, String> {
         context_lines: o.context_lines.unwrap_or(2),
         retry_rejected: !o.no_retry,
         debug: o.debug || env("POLIBRE_DEBUG").is_some_and(|v| v != "0"),
+        skip: Default::default(),
     };
     Ok(Prepared {
         provider,
@@ -728,7 +729,7 @@ fn cmd_check(o: &Opts) -> Result<i32, String> {
                             c(BOLD),
                             trunc(&e.msgid, 90),
                             c(RESET),
-                            trunc(&e.msgstr.join(" | "), 90),
+                            trunc(&crate::engine::show_forms(&e.msgstr, " · "), 90),
                             c(DIM),
                             why,
                             c(RESET)
@@ -874,11 +875,16 @@ fn cmd_translate(o: &Opts) -> Result<i32, String> {
                 lang,
                 path,
                 msgid,
-                msgstr,
+                forms,
                 ..
-            } => report_ok.push(
-                serde_json::json!({"lang": lang, "file": path, "msgid": msgid, "msgstr": msgstr}),
-            ),
+            } => {
+                // A string, or a list of forms for plural entries.
+                let msgstr = match forms.as_slice() {
+                    [one] => serde_json::json!(one),
+                    _ => serde_json::json!(forms),
+                };
+                report_ok.push(serde_json::json!({"lang": lang, "file": path, "msgid": msgid, "msgstr": msgstr}))
+            }
             Event::Rejected {
                 lang,
                 path,
@@ -1146,7 +1152,8 @@ impl Ui {
                     self.draw();
                 }
             }
-            Event::Translated { msgid, msgstr, .. } => {
+            Event::Translated { msgid, forms, .. } => {
+                let msgstr = &crate::engine::show_forms(forms, " · ");
                 self.done += 1;
                 self.file_done += 1;
                 let w = term_width().saturating_sub(12) / 2;

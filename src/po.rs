@@ -267,6 +267,16 @@ fn is_translator_comment(l: &str) -> bool {
         || (l.starts_with('#') && !matches!(l.chars().nth(1), Some('.' | ':' | ',' | '|' | '~')))
 }
 
+/// What happened to a proposed translation (see [`PoFile::write_proposals`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Written {
+    Ok,
+    /// The string is no longer in the file.
+    Missing,
+    /// It was translated and reviewed in the meantime; left as it is.
+    Taken,
+}
+
 #[derive(Debug, Clone)]
 pub enum Item {
     Entry(Entry),
@@ -281,22 +291,38 @@ pub struct PoFile {
 }
 
 impl PoFile {
-    /// Marks one entry (found by context and source text) as reviewed in the
-    /// file on disk. Returns false if the entry isn't there.
+    /// Writes proposed translations into the file at `path`, each found by
+    /// (msgctxt, msgid). `review`: mark them as needing review (fuzzy) with
+    /// `note`; otherwise they're written as reviewed, without a note. An entry
+    /// that someone translated and reviewed meanwhile isn't overwritten.
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
-    pub fn approve_in_file(path: &Path, msgctxt: Option<&str>, msgid: &str) -> io::Result<bool> {
+    pub fn write_proposals(
+        path: &Path,
+        items: &[(Option<String>, String, Vec<String>)],
+        review: bool,
+        note: Option<&str>,
+    ) -> io::Result<Vec<Written>> {
         let mut po = Self::load(path)?;
-        let Some(e) = po
-            .entries_mut()
-            .find(|e| !e.obsolete && e.msgid == msgid && e.msgctxt.as_deref() == msgctxt)
-        else {
-            return Ok(false);
-        };
-        if e.is_fuzzy() {
-            e.set_needs_review(false);
+        let mut out = Vec::new();
+        for (ctxt, msgid, forms) in items {
+            let found = po.entries_mut().find(|e| {
+                !e.obsolete && e.msgid == *msgid && e.msgctxt.as_deref() == ctxt.as_deref()
+            });
+            out.push(match found {
+                None => Written::Missing,
+                Some(e) if !e.is_untranslated() && !e.is_fuzzy() => Written::Taken,
+                Some(e) => {
+                    e.set_translation(forms.clone(), None, review);
+                    // One note at most: the new one, or none for a reviewed translation.
+                    e.set_auto_note(if review { note.map(String::from) } else { None });
+                    Written::Ok
+                }
+            });
+        }
+        if out.contains(&Written::Ok) {
             po.save(path)?;
         }
-        Ok(true)
+        Ok(out)
     }
 
     pub fn load(path: &Path) -> io::Result<PoFile> {
@@ -683,9 +709,9 @@ msgstr[1] ""
     fn modify_entry() {
         let mut po = PoFile::parse(SAMPLE);
         let e = po.entries_mut().nth(2).unwrap();
-        e.set_translation(vec!["Riavvio necessario. Riavviare WebODM per disabilitare completamente %(plugin)s e tutto il resto".into()], Some(crate::auto_comment("opus", "2026-11-11", true)), true);
+        e.set_translation(vec!["Riavvio necessario. Riavviare WebODM per disabilitare completamente %(plugin)s e tutto il resto".into()], Some(crate::auto_comment("opus")), true);
         let out = po.render();
-        assert!(out.contains("# Translated by opus on 2026-11-11, needs review\n#: app/a.py:1 app/b.py:2\n#, fuzzy, python-format\nmsgid"));
+        assert!(out.contains("# Translated by opus\n#: app/a.py:1 app/b.py:2\n#, fuzzy, python-format\nmsgid"));
         let re = PoFile::parse(&out);
         let e = re.entries().nth(2).unwrap();
         assert!(e.is_fuzzy());
@@ -757,23 +783,35 @@ mod corpus_tests {
     }
 
     #[test]
-    fn approve_one_entry_in_a_file() {
-        let dir = std::env::temp_dir().join(format!("polibre-approve-{}", std::process::id()));
+    fn write_proposals_accepted_or_for_review() {
+        let dir = std::env::temp_dir().join(format!("polibre-proposals-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("django.po");
-        std::fs::write(&path, "msgid \"\"\nmsgstr \"\"\n\n# Translated by opus on 2026-11-11, needs review\n#, fuzzy\nmsgctxt \"menu\"\nmsgid \"Open\"\nmsgstr \"Apri\"\n\n#, fuzzy\nmsgid \"Open\"\nmsgstr \"Aperto\"\n").unwrap();
-        assert!(PoFile::approve_in_file(&path, Some("menu"), "Open").unwrap());
+        std::fs::write(
+            &path,
+            "msgid \"\"\nmsgstr \"\"\n\nmsgid \"Save\"\nmsgstr \"\"\n\nmsgctxt \"menu\"\nmsgid \"Open\"\nmsgstr \"\"\n\n# Translated by opus on 2026-01-01, needs review\n#, fuzzy\nmsgid \"Close\"\nmsgstr \"Chiudi?\"\n\nmsgid \"Done\"\nmsgstr \"Fatto\"\n",
+        )
+        .unwrap();
+        let item = |c: Option<&str>, id: &str, t: &str| (c.map(String::from), id.to_string(), vec![t.to_string()]);
+        // Accepted: reviewed, no note (an old note goes too).
+        let r = PoFile::write_proposals(&path, &[item(None, "Save", "Salva"), item(None, "Close", "Chiudi")], false, Some("ignored")).unwrap();
+        assert_eq!(r, vec![Written::Ok, Written::Ok]);
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            text.contains("\n\nmsgctxt \"menu\"\nmsgid \"Open\"\nmsgstr \"Apri\"\n"),
-            "{}",
-            text
-        );
-        assert!(
-            text.contains("#, fuzzy\nmsgid \"Open\"\nmsgstr \"Aperto\""),
-            "the other entry is untouched"
-        );
-        assert!(!PoFile::approve_in_file(&path, None, "Missing").unwrap());
+        assert!(text.contains("\n\nmsgid \"Save\"\nmsgstr \"Salva\"\n"), "{}", text);
+        assert!(text.contains("\n\nmsgid \"Close\"\nmsgstr \"Chiudi\"\n"), "{}", text);
+        assert!(!text.contains("Translated by"), "{}", text);
+        // For review: fuzzy with the note. Missing and reviewed entries are reported, not touched.
+        let r = PoFile::write_proposals(
+            &path,
+            &[item(Some("menu"), "Open", "Apri"), item(None, "Gone", "Via"), item(None, "Done", "Finito")],
+            true,
+            Some("Translated by opus"),
+        )
+        .unwrap();
+        assert_eq!(r, vec![Written::Ok, Written::Missing, Written::Taken]);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# Translated by opus\n#, fuzzy\nmsgctxt \"menu\"\nmsgid \"Open\"\nmsgstr \"Apri\""), "{}", text);
+        assert!(text.contains("msgid \"Done\"\nmsgstr \"Fatto\""), "{}", text);
         std::fs::remove_dir_all(&dir).ok();
     }
 

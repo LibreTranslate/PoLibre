@@ -11,7 +11,7 @@ use crate::project::{Glossary, SourceCache};
 use crate::providers::{self, Cancel, LtLanguages};
 use crate::validate::{self, Src};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
@@ -38,6 +38,17 @@ pub struct JobSettings {
     pub retry_rejected: bool,
     /// Send `Event::Debug` entries with every request, reply and check.
     pub debug: bool,
+    /// Entries not to translate: (file, msgctxt, msgid), e.g. translations
+    /// already waiting for the user's decision in the GUI.
+    pub skip: HashSet<(PathBuf, Option<String>, String)>,
+}
+
+impl JobSettings {
+    fn wanted(&self, path: &std::path::Path, e: &Entry) -> bool {
+        e.needs_translation(self.include_fuzzy)
+            && (self.skip.is_empty()
+                || !self.skip.contains(&(path.to_path_buf(), e.msgctxt.clone(), e.msgid.clone())))
+    }
 }
 
 impl Default for JobSettings {
@@ -57,6 +68,7 @@ impl Default for JobSettings {
             context_lines: 2,
             retry_rejected: true,
             debug: false,
+            skip: HashSet::new(),
         }
     }
 }
@@ -105,7 +117,8 @@ pub enum Event {
         path: PathBuf,
         msgctxt: Option<String>,
         msgid: String,
-        msgstr: String,
+        /// The translation; several forms for plural entries.
+        forms: Vec<String>,
     },
     Rejected {
         lang: String,
@@ -216,25 +229,6 @@ fn short(s: &str, n: usize) -> String {
     }
 }
 
-pub fn today() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0) as i64;
-    let days = secs.div_euclid(86400);
-    // civil-from-days (Howard Hinnant)
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    format!("{:04}-{:02}-{:02}", if m <= 2 { y + 1 } else { y }, m, d)
-}
-
 pub fn run(
     provider: ProviderConfig,
     settings: JobSettings,
@@ -244,7 +238,7 @@ pub fn run(
 ) -> Summary {
     let start = Instant::now();
     let mut summary = Summary::default();
-    let comment = auto_note(&provider, &settings, settings.mark_fuzzy);
+    let comment = auto_note(&provider, &settings);
     let mut ctx = Ctx {
         provider: &provider,
         settings: &settings,
@@ -323,7 +317,7 @@ pub fn run(
             if let Ok(po) = PoFile::load(f) {
                 let n = po
                     .entries()
-                    .filter(|e| e.needs_translation(settings.include_fuzzy))
+                    .filter(|e| settings.wanted(f, e))
                     .count();
                 if n > 0 {
                     nfiles += 1;
@@ -377,7 +371,7 @@ pub fn run(
                 .iter()
                 .enumerate()
                 .filter_map(|(i, it)| match it {
-                    Item::Entry(e) if e.needs_translation(settings.include_fuzzy) => {
+                    Item::Entry(e) if settings.wanted(path, e) => {
                         Some(Work::from_entry(i, e))
                     }
                     _ => None,
@@ -458,7 +452,7 @@ pub fn run(
                     match r {
                         Ok(forms) => {
                             if let Item::Entry(e) = &mut po.items[w.idx] {
-                                let shown = forms.join(" | ");
+                                let shown = forms.clone();
                                 e.set_translation(
                                     forms,
                                     ctx.comment.clone(),
@@ -472,7 +466,7 @@ pub fn run(
                                     path: path.clone(),
                                     msgctxt: w.msgctxt.clone(),
                                     msgid: w.msgid.clone(),
-                                    msgstr: shown,
+                                    forms: shown,
                                 });
                             }
                         }
@@ -512,19 +506,40 @@ pub fn run(
 }
 
 /// The "Translated by <model> on <date>" note for new translations, if enabled.
-pub fn auto_note(
-    provider: &ProviderConfig,
-    settings: &JobSettings,
-    review: bool,
-) -> Option<String> {
+pub fn auto_note(provider: &ProviderConfig, settings: &JobSettings) -> Option<String> {
     settings.add_comment.then(|| {
         let by = if provider.kind.is_llm() && !provider.model.is_empty() {
             provider.model.as_str()
         } else {
             provider.kind.id()
         };
-        crate::auto_comment(by, &today(), review)
+        crate::auto_comment(by)
     })
+}
+
+/// A translation for display, with plural forms told apart (joining them
+/// with a separator would look like alternatives):
+/// "Singular: …" / "Plural: …", or "Form 1: …" for languages with more forms.
+pub fn show_forms(forms: &[String], sep: &str) -> String {
+    if forms.len() == 1 {
+        return forms[0].clone();
+    }
+    forms
+        .iter()
+        .enumerate()
+        .map(|(i, f)| format!("{}: {}", form_label(i, forms.len()), f))
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+/// The name of plural form `k` of `n`: "Singular"/"Plural" for languages
+/// with two forms, otherwise "Form 1", "Form 2", …
+pub fn form_label(k: usize, n: usize) -> String {
+    match (n, k) {
+        (2, 0) => "Singular".into(),
+        (2, _) => "Plural".into(),
+        _ => format!("Form {}", k + 1),
+    }
 }
 
 /// The glossary sent to LLMs: terms already translated in the language's
@@ -1253,6 +1268,44 @@ pub fn unprotect(text: &str, had_tags: bool) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn skipped_entries_are_not_translated_again() {
+        let dir = std::env::temp_dir().join(format!("polibre-skip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("django.po");
+        std::fs::write(&path, "msgid \"\"\nmsgstr \"\"\n\nmsgid \"Save\"\nmsgstr \"\"\n\nmsgid \"Open\"\nmsgstr \"\"\n").unwrap();
+        let (url, seen) = mock_server(|path, body| match path {
+            "/languages" => json!([{"code": "en", "targets": ["it"]}, {"code": "it", "targets": ["en"]}]).to_string(),
+            _ => {
+                let q: Value = serde_json::from_str(body).unwrap();
+                json!({"translatedText": q["q"].as_array().unwrap().iter().map(|x| format!("it {}", x.as_str().unwrap())).collect::<Vec<_>>()}).to_string()
+            }
+        });
+        let provider = ProviderConfig { kind: ProviderKind::Libretranslate, model: String::new(), api_key: String::new(), url };
+        let mut settings = JobSettings { dry_run: true, ..Default::default() };
+        settings.skip.insert((path.clone(), None, "Save".into()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s = run(provider, settings, vec![Target { lang: "it".into(), files: vec![path.clone()] }], tx, cancel);
+        assert_eq!(s.translated, 1);
+        let got: Vec<String> = rx.try_iter().filter_map(|e| match e { Event::Translated { msgid, .. } => Some(msgid), _ => None }).collect();
+        assert_eq!(got, vec!["Open"]);
+        assert!(seen.lock().unwrap().iter().all(|b| !b.contains("Save")), "Save wasn't sent");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("msgid \"Open\"\nmsgstr \"\""), "a preview writes nothing");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plural_forms_are_labelled() {
+        let f = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(show_forms(&f(&["Ciao"]), "\n"), "Ciao");
+        assert_eq!(
+            show_forms(&f(&["Correggi l'errore qui sotto.", "Correggi gli errori qui sotto."]), "\n"),
+            "Singular: Correggi l'errore qui sotto.\nPlural: Correggi gli errori qui sotto."
+        );
+        assert_eq!(show_forms(&f(&["a", "b", "c"]), " · "), "Form 1: a · Form 2: b · Form 3: c");
+    }
+
+    #[test]
     fn protect_roundtrip() {
         let f = vec!["python-format".to_string()];
         let p = protect("Cannot convert %(file)s: %(reason)s & more", &f);
@@ -1271,10 +1324,6 @@ mod tests {
         let m = extract_json("{\"translations\": {\"0\": \"x\"}}").unwrap();
         assert_eq!(m["0"], "x");
         assert!(extract_json("no json").is_err());
-    }
-    #[test]
-    fn date() {
-        assert_eq!(today().len(), 10);
     }
 
     /// A one-shot local HTTP server: answers each request with `reply(path, body)`
@@ -1391,6 +1440,38 @@ mod tests {
             &cancel,
         );
         assert!(out.is_err_and(|e| e.contains("%(name)s")));
+    }
+
+    #[test]
+    fn a_slow_suggestion_can_be_cancelled() {
+        use std::io::Read;
+        // A model that takes 10 s to answer.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let _ = s.read(&mut buf);
+                std::thread::sleep(Duration::from_secs(10));
+            }
+        });
+        let provider = ProviderConfig {
+            kind: ProviderKind::OpenaiCompatible,
+            model: "test".into(),
+            api_key: String::new(),
+            url,
+        };
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let c2 = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            c2.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        let t0 = Instant::now();
+        let out = suggest(&provider, &JobSettings::default(), "it", &[], &entry("Hello %(name)s"), 2, "", &tx, &cancel);
+        assert_eq!(out, Err("cancelled".to_string()));
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
     }
 
     #[test]

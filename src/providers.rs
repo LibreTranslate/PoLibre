@@ -108,8 +108,9 @@ fn post_logged(
     let started = std::time::Instant::now();
     let s2 = sink.clone();
     let n2 = notice_sink();
+    let c2 = cancel.clone();
     let r = cancellable(cancel, move || {
-        post_json(&url, &headers, &body, s2.as_ref(), n2.as_ref())
+        post_json(&url, &headers, &body, s2.as_ref(), n2.as_ref(), &c2)
     })?;
     if let Some(s) = &sink {
         match &r {
@@ -207,7 +208,7 @@ static PACE: std::sync::Mutex<Vec<(String, Duration, std::time::Instant)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Waits until the next request to `url` is allowed by the learned pace.
-fn pace_wait(url: &str) {
+fn pace_wait(url: &str, cancel: &Cancel) -> Result<(), String> {
     let wait = {
         let mut p = PACE.lock().unwrap();
         match p.iter_mut().find(|e| e.0 == url) {
@@ -220,8 +221,21 @@ fn pace_wait(url: &str) {
             None => Duration::ZERO,
         }
     };
-    if !wait.is_zero() {
-        std::thread::sleep(wait);
+    sleep_unless_cancelled(wait, cancel)
+}
+
+/// Waits, but gives up as soon as the operation is cancelled.
+fn sleep_unless_cancelled(d: Duration, cancel: &Cancel) -> Result<(), String> {
+    let end = std::time::Instant::now() + d;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(left.min(Duration::from_millis(100)));
     }
 }
 
@@ -283,13 +297,15 @@ fn post_json(
     body: &Value,
     dbg: Option<&DebugSink>,
     notice: Option<&NoticeSink>,
+    cancel: &Cancel,
 ) -> Result<Value, String> {
     let a = agent();
     let mut delay = 2u64;
     let mut failures = 0u32;
     let mut slowdowns = 0u32;
     loop {
-        pace_wait(url);
+        // A cancelled request stops here: no more waiting, retries or sending.
+        pace_wait(url, cancel)?;
         let mut req = a.post(url);
         for (k, v) in headers {
             req = req.set(k, v);
@@ -351,7 +367,7 @@ fn post_json(
                     secs(wait)
                 ));
             }
-            std::thread::sleep(wait);
+            sleep_unless_cancelled(wait, cancel)?;
             continue;
         }
         let retry = match &err {
@@ -369,7 +385,7 @@ fn post_json(
                 last.clone(),
             );
         }
-        std::thread::sleep(Duration::from_secs(delay));
+        sleep_unless_cancelled(Duration::from_secs(delay), cancel)?;
         delay *= 2;
     }
 }
@@ -377,6 +393,43 @@ fn post_json(
 #[cfg(test)]
 mod rate_tests {
     use super::*;
+
+    /// A server that always says "slow down, retry in 30 s"; counts requests.
+    fn slowdown_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/translate", listener.local_addr().unwrap());
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                h.fetch_add(1, Ordering::Relaxed);
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let body = r#"{"error":"Slowdown: 1 per 1 minute"}"#;
+                let _ = write!(s, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            }
+        });
+        (url, hits)
+    }
+
+    #[test]
+    fn cancelling_stops_waiting_and_retrying() {
+        let (url, hits) = slowdown_server();
+        let cancel: Cancel = Arc::new(AtomicBool::new(false));
+        let c2 = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            c2.store(true, Ordering::Relaxed);
+        });
+        let t0 = std::time::Instant::now();
+        let r = post_logged(&cancel, url, vec![], json!({"q": "hi"}), &[]);
+        assert_eq!(r, Err("cancelled".to_string()));
+        assert!(t0.elapsed() < Duration::from_secs(2), "returned at once ({:?})", t0.elapsed());
+        // The helper thread doesn't send anything more after the cancel.
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn parses_libretranslate_limits() {

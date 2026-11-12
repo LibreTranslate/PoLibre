@@ -35,6 +35,21 @@ const ACCENT: Color32 = Color32::from_rgb(0, 95, 184);
 const GREEN: Color32 = Color32::from_rgb(60, 160, 90);
 const AMBER: Color32 = Color32::from_rgb(214, 150, 30);
 const RED: Color32 = Color32::from_rgb(210, 70, 70);
+/// A button turned into "stop": a soft red tint with a stop icon. Used in
+/// place of the button that started the work (Translate, Suggest, Refresh).
+fn stop_button(ui: &egui::Ui, text: &str) -> egui::Button<'static> {
+    let (fill, ink) = stop_colors(ui);
+    egui::Button::new(RichText::new(format!("■  {}", text)).color(ink)).fill(fill)
+}
+
+/// A soft red (fill, ink) for buttons that stop or discard something.
+fn stop_colors(ui: &egui::Ui) -> (Color32, Color32) {
+    if ui.visuals().dark_mode {
+        (Color32::from_rgb(84, 44, 42), Color32::from_rgb(255, 190, 182))
+    } else {
+        (Color32::from_rgb(251, 228, 225), Color32::from_rgb(170, 52, 40))
+    }
+}
 
 const TRANSLATE_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
 
@@ -281,12 +296,21 @@ struct LogLine {
     lang: String,
     a: String,
     b: String,
-    /// The string in its file; None for general messages and previews.
+    /// The string in its file; None for general messages.
     entry: Option<ResultRef>,
-    /// The translation was approved from the Results tab.
-    approved: bool,
-    /// Why approving failed.
+    /// The proposed translation (plural forms separately); empty if rejected.
+    forms: Vec<String>,
+    /// "Translated by <model>", written with it when marked for review.
+    note: Option<String>,
+    /// Why writing it to the file didn't work.
     problem: Option<String>,
+}
+
+impl LogLine {
+    /// A translation waiting for Accept / Edit (not yet in the file).
+    fn is_proposal(&self) -> bool {
+        self.kind == LogKind::Ok && self.entry.is_some() && !self.forms.is_empty()
+    }
 }
 
 struct Job {
@@ -301,8 +325,8 @@ struct Job {
     current: Vec<String>,
     started: Instant,
     eta: Option<f32>,
-    dry_run: bool,
-    mark_fuzzy: bool,
+    /// The note for this run's translations when they're marked for review.
+    note: Option<String>,
     finished: Option<Summary>,
 }
 
@@ -334,7 +358,8 @@ enum Bg {
     /// An entry for the Console from work outside a translation run.
     Console(Option<LogKind>, String, String),
     Suggested(editor::Suggestion),
-    Models(ProviderKind, Result<Vec<String>, String>),
+    /// Model list for a service; the number identifies the request (see `models_req`).
+    Models(ProviderKind, u64, Result<Vec<String>, String>),
     Lt(String, Result<LtLanguages, String>),
     Picked(Pick, Result<Option<String>, String>),
 }
@@ -355,6 +380,8 @@ struct App {
     lt_langs: Option<(String, LtLanguages)>,
     lt_loading: bool,
     models_loading: bool,
+    /// Identifies the latest model-list request; answers to older (cancelled) ones are ignored.
+    models_req: u64,
     picking: bool,
     pick_note: Option<String>,
     bg_tx: Sender<Bg>,
@@ -370,17 +397,18 @@ struct App {
     console_filter: String,
     console_follow: bool,
     editor: Option<editor::Editor>,
+    /// Suggestions being fetched (file, entry, cancel flag).
+    suggest_jobs: Vec<(PathBuf, usize, Arc<AtomicBool>)>,
     editor_problem: Option<String>,
     pending: Option<Pending>,
+    /// "Reload the project?" is showing.
+    reload_prompt: bool,
     quitting: bool,
     summary: String,
     source_root: String,
     glossary: String,
     source_lang: String,
     include_fuzzy: bool,
-    add_comment: bool,
-    mark_fuzzy: bool,
-    dry_run: bool,
     batch_size: usize,
     limit: usize,
     more_options: bool,
@@ -452,6 +480,7 @@ impl App {
             lt_langs: None,
             lt_loading: false,
             models_loading: false,
+            models_req: 0,
             picking: false,
             pick_note: None,
             bg_tx,
@@ -471,17 +500,16 @@ impl App {
             console_filter: String::new(),
             console_follow: true,
             editor: None,
+            suggest_jobs: Vec::new(),
             editor_problem: None,
             pending: None,
+            reload_prompt: false,
             quitting: false,
             summary: String::new(),
             source_root: String::new(),
             glossary: String::new(),
             source_lang: cfg.source_lang.clone(),
             include_fuzzy: cfg.include_fuzzy,
-            add_comment: cfg.add_comment,
-            mark_fuzzy: cfg.mark_fuzzy,
-            dry_run: false,
             batch_size: cfg.batch_size,
             limit: 0,
             more_options: std::env::var("POLIBRE_MORE_OPTIONS").is_ok(),
@@ -509,8 +537,6 @@ impl App {
         // Developer aid: POLIBRE_AUTOSTART=it,de selects languages and starts a preview run.
         if let Ok(l) = std::env::var("POLIBRE_AUTOSTART") {
             app.selected = l.split(',').map(|s| s.trim().to_string()).collect();
-            // Previews only, unless POLIBRE_AUTOSTART_WRITE=1 (use on a scratch copy).
-            app.dry_run = std::env::var("POLIBRE_AUTOSTART_WRITE").is_err();
             app.limit = 40;
             app.start(false);
         }
@@ -591,10 +617,11 @@ impl App {
         let pc = self.provider_config();
         self.models_loading = true;
         self.model_note = None;
-        let tx = self.bg_tx.clone();
+        self.models_req += 1;
+        let (tx, req) = (self.bg_tx.clone(), self.models_req);
         std::thread::spawn(move || {
             let r = providers::list_models(&pc);
-            let _ = tx.send(Bg::Models(pc.kind, r));
+            let _ = tx.send(Bg::Models(pc.kind, req, r));
         });
     }
 
@@ -637,21 +664,35 @@ impl App {
         }
         self.cfg.providers.insert(self.provider, s);
         self.cfg.include_fuzzy = self.include_fuzzy;
-        self.cfg.add_comment = self.add_comment;
-        self.cfg.mark_fuzzy = self.mark_fuzzy;
         self.cfg.batch_size = self.batch_size;
         self.cfg.source_lang = self.source_lang.clone();
         let _ = self.cfg.save();
     }
 
+    /// Translations waiting in Results, per language code.
+    fn proposals_per_language(&self) -> BTreeMap<String, usize> {
+        let mut m = BTreeMap::new();
+        for l in self.log.iter().filter(|l| l.is_proposal()) {
+            *m.entry(l.entry.as_ref().unwrap().code.clone()).or_insert(0) += 1;
+        }
+        m
+    }
+
+    /// Strings a run would translate in a language: the missing ones, minus
+    /// those already waiting in Results.
+    fn to_translate(&self, l: &project::LangInfo, waiting: &BTreeMap<String, usize>) -> usize {
+        l.untranslated().saturating_sub(waiting.get(&l.code).copied().unwrap_or(0))
+    }
+
     fn pending_count(&self) -> usize {
         let Some(p) = &self.project else { return 0 };
+        let waiting = self.proposals_per_language();
         let n: usize = self
             .selected
             .iter()
             .filter(|l| self.lt_supported(l) != Some(false))
             .filter_map(|l| p.languages.get(l))
-            .map(|l| l.untranslated())
+            .map(|l| self.to_translate(l, &waiting))
             .sum();
         if self.limit > 0 {
             n.min(self.limit)
@@ -665,12 +706,13 @@ impl App {
             self.save_settings();
         }
         let Some(proj) = &self.project else { return };
+        let waiting = self.proposals_per_language();
         let targets: Vec<Target> = self
             .selected
             .iter()
             .filter(|l| self.lt_supported(l) != Some(false))
             .filter_map(|l| proj.languages.get(l))
-            .filter(|l| l.untranslated() > 0)
+            .filter(|l| self.to_translate(l, &waiting) > 0)
             .map(|l| Target {
                 lang: l.code.clone(),
                 files: l.files.iter().map(|f| f.path.clone()).collect(),
@@ -681,10 +723,13 @@ impl App {
         }
         let settings = self.job_settings(proj);
         let provider = self.provider_config();
+        let note = engine::auto_note(&provider, &settings);
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let c2 = cancel.clone();
-        self.log.clear();
+        // Keep the translations still waiting for a decision (the run skips
+        // them); drop the rest of the previous run's results.
+        self.log.retain(|l| l.is_proposal());
         self.tab = Tab::Results;
         self.console_t0 = Instant::now();
         std::thread::spawn(move || engine::run(provider, settings, targets, tx, c2));
@@ -700,8 +745,7 @@ impl App {
             current: vec![],
             started: Instant::now(),
             eta: None,
-            dry_run: self.dry_run,
-            mark_fuzzy: self.mark_fuzzy,
+            note,
             finished: None,
         });
     }
@@ -719,15 +763,16 @@ impl App {
             summary: self.summary.clone(),
             source_lang: self.source_lang.clone(),
             include_fuzzy: self.include_fuzzy,
-            add_comment: self.add_comment,
-            mark_fuzzy: self.mark_fuzzy,
+            // The app shows translations first; nothing is written by a run.
+            add_comment: true,
+            mark_fuzzy: true,
             batch_size: self.batch_size,
             limit: if self.limit > 0 {
                 Some(self.limit)
             } else {
                 None
             },
-            dry_run: self.dry_run,
+            dry_run: true,
             glossary_file: if self.glossary.trim().is_empty() {
                 None
             } else {
@@ -736,6 +781,14 @@ impl App {
             context_lines: 2,
             retry_rejected: true,
             debug: true,
+            // Translations waiting in Results aren't asked for again.
+            skip: self
+                .log
+                .iter()
+                .filter(|l| l.is_proposal())
+                .filter_map(|l| l.entry.as_ref())
+                .map(|r| (r.path.clone(), r.msgctxt.clone(), r.msgid.clone()))
+                .collect(),
         }
     }
 
@@ -745,11 +798,12 @@ impl App {
         let Some(proj) = &self.project else { return };
         let settings = self.job_settings(proj);
         let provider = self.provider_config();
-        let note = engine::auto_note(&provider, &settings, true);
+        let note = engine::auto_note(&provider, &settings);
         let bg = self.bg_tx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.suggest_jobs.push((job.path.clone(), job.idx, cancel.clone()));
         std::thread::spawn(move || {
             let (tx, rx) = channel();
-            let cancel = Arc::new(AtomicBool::new(false));
             let e = job.entry.clone();
             let worker = std::thread::spawn(move || {
                 engine::suggest(
@@ -927,16 +981,32 @@ impl App {
         }
     }
 
+    /// Stops the suggestion requests the editor no longer waits for: cancelled
+    /// by the user, or the editor was closed, reloaded or switched files.
+    fn cancel_unwanted_suggestions(&mut self) {
+        let ed = self.editor.as_ref();
+        self.suggest_jobs.retain(|(path, idx, cancel)| {
+            let wanted = ed.is_some_and(|e| e.wants_suggestion(path, *idx));
+            if !wanted {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            wanted
+        });
+    }
+
     fn poll(&mut self) {
+        self.cancel_unwanted_suggestions();
         while let Ok(b) = self.bg_rx.try_recv() {
             match b {
                 Bg::Console(kind, title, body) => self.push_console(kind, title, body),
                 Bg::Suggested(s) => {
+                    self.suggest_jobs.retain(|(p, i, _)| !(*p == s.path && *i == s.idx));
                     if let Some(ed) = &mut self.editor {
                         ed.suggested(s);
                     }
                 }
-                Bg::Models(k, r) => {
+                Bg::Models(_, req, _) if req != self.models_req => {} // cancelled
+                Bg::Models(k, _, r) => {
                     self.models_loading = false;
                     match r {
                         Ok(m) if m.is_empty() => {
@@ -983,7 +1053,6 @@ impl App {
         }
         let mut new_logs = Vec::new();
         let mut new_console: Vec<(Option<LogKind>, String, String)> = Vec::new();
-        let mut rescan = false;
         if let Some(job) = &mut self.job {
             while let Ok(ev) = job.rx.try_recv() {
                 let msg = |kind, m: String| LogLine {
@@ -992,12 +1061,12 @@ impl App {
                     a: m,
                     b: String::new(),
                     entry: None,
-                    approved: false,
+                    forms: vec![],
+                    note: None,
                     problem: None,
                 };
-                // Strings of a preview aren't in the files, so they can't be approved or edited.
                 let entry = |code: &str, path: PathBuf, msgctxt: Option<String>, msgid: &str| {
-                    (!job.dry_run).then(|| ResultRef {
+                    Some(ResultRef {
                         code: code.to_string(),
                         path,
                         msgctxt,
@@ -1032,18 +1101,19 @@ impl App {
                         path,
                         msgctxt,
                         msgid,
-                        msgstr,
+                        forms,
                     } => {
                         job.done += 1;
                         job.translated += 1;
+                        let msgstr = engine::show_forms(&forms, "\n");
                         new_logs.push(LogLine {
                             kind: LogKind::Ok,
                             lang: langs::name(&lang),
                             entry: entry(&lang, path, msgctxt, &msgid),
                             a: msgid,
                             b: msgstr,
-                            // Already final when "Mark as fuzzy" is off.
-                            approved: !job.mark_fuzzy,
+                            forms,
+                            note: job.note.clone(),
                             problem: None,
                         });
                     }
@@ -1062,7 +1132,8 @@ impl App {
                             entry: entry(&lang, path, msgctxt, &msgid),
                             a: msgid,
                             b: format!("Not used: {}", reason),
-                            approved: false,
+                            forms: vec![],
+                            note: None,
                             problem: None,
                         });
                     }
@@ -1071,7 +1142,6 @@ impl App {
                     Event::Finished(s) => {
                         job.current.clear();
                         job.finished = Some(s);
-                        rescan = true;
                     }
                 }
             }
@@ -1081,17 +1151,6 @@ impl App {
         }
         for (kind, title, body) in new_console {
             self.push_console(kind, title, body);
-        }
-        if rescan && !self.dry_run {
-            let sel = self.selected.clone();
-            self.scan();
-            self.selected = sel;
-            // Show the new translations in an open editor that has no unsaved edits.
-            if let Some(ed) = &mut self.editor {
-                if !ed.dirty() {
-                    let _ = ed.load();
-                }
-            }
         }
     }
 
@@ -1225,16 +1284,7 @@ impl App {
             .as_ref()
             .map(|e| e.name.clone())
             .unwrap_or_default();
-        // Dim and block the window behind the dialog.
-        let screen = ctx.screen_rect();
-        egui::Area::new(egui::Id::new("modal-backdrop"))
-            .order(egui::Order::Middle)
-            .fixed_pos(screen.min)
-            .show(ctx, |ui| {
-                ui.allocate_rect(screen, egui::Sense::click());
-                ui.painter()
-                    .rect_filled(screen, 0.0, Color32::from_black_alpha(110));
-            });
+        modal_backdrop(ctx);
         let mut answer: Option<u8> = None; // 0 save, 1 don't save, 2 cancel
         egui::Window::new("PoLibre")
             .id(egui::Id::new("save-prompt"))
@@ -1318,6 +1368,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 self.theme_button(ui);
+                self.reload_button(ui, running);
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     self.settings_toggle(ui);
                     self.project_field(ui, running)
@@ -1339,6 +1390,109 @@ impl App {
         if ui.add(b).on_hover_text(tip).clicked() {
             self.cfg.hide_settings = !hidden;
             let _ = self.cfg.save();
+        }
+    }
+
+    /// Reads the project's files again; asks first if that would lose
+    /// unsaved edits or translations waiting in Results.
+    fn reload_button(&mut self, ui: &mut egui::Ui, running: bool) {
+        let enabled = !running && !self.picking && !self.path.trim().is_empty();
+        let b = egui::Button::new(RichText::new("🔄").size(17.0));
+        if ui
+            .add_enabled(enabled, b)
+            .on_hover_text("Reload the project's translation files")
+            .on_disabled_hover_text("Can't reload while translating")
+            .clicked()
+        {
+            if self.editor_dirty() || self.log.iter().any(|l| l.is_proposal()) {
+                self.reload_prompt = true;
+            } else {
+                self.reload();
+            }
+        }
+    }
+
+    /// Reads the project again from disk, dropping unsaved editor changes and
+    /// the Results list.
+    fn reload(&mut self) {
+        self.reload_prompt = false;
+        self.log.clear();
+        // The last run's results and notes no longer apply.
+        if !self.running() {
+            self.job = None;
+            if self.tab == Tab::Results {
+                self.tab = Tab::Languages;
+            }
+        }
+        let sel = self.selected.clone();
+        self.scan();
+        self.selected = sel;
+        self.selected
+            .retain(|l| self.project.as_ref().is_some_and(|p| p.languages.contains_key(l)));
+        let lang = self.editor.as_ref().map(|e| e.lang.clone());
+        if let Some(code) = lang {
+            let still_there = self.project.as_ref().is_some_and(|p| p.languages.contains_key(&code));
+            if !still_there {
+                self.perform(Pending::CloseEditor);
+            } else if let Some(ed) = &mut self.editor {
+                if let Err(e) = ed.load() {
+                    self.editor_problem = Some(e);
+                }
+            }
+        }
+    }
+
+    fn reload_prompt(&mut self, ctx: &egui::Context) {
+        if !self.reload_prompt {
+            return;
+        }
+        let mut lost = Vec::new();
+        if let Some(ed) = self.editor.as_ref().filter(|e| e.dirty()) {
+            lost.push(format!("Your unsaved changes to the {} translations will be lost.", ed.name));
+        }
+        match self.log.iter().filter(|l| l.is_proposal()).count() {
+            0 => {}
+            1 => lost.push("1 translation in Results hasn't been accepted or marked for review yet, and will be discarded.".into()),
+            n => lost.push(format!(
+                "{} translations in Results haven't been accepted or marked for review yet, and will be discarded.",
+                thousands(n)
+            )),
+        }
+        modal_backdrop(ctx);
+        let mut answer: Option<bool> = None;
+        egui::Window::new("PoLibre")
+            .id(egui::Id::new("reload-prompt"))
+            .order(egui::Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .title_bar(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(egui::Frame::popup(&ctx.style()).inner_margin(20.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(440.0);
+                ui.label(RichText::new("Reload the project?").text_style(TextStyle::Name("group".into())));
+                ui.add_space(4.0);
+                for l in &lost {
+                    ui.add(egui::Label::new(RichText::new(l).weak()).wrap());
+                }
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    let (fill, ink) = stop_colors(ui);
+                    let reload = egui::Button::new(RichText::new("Reload").color(ink)).fill(fill).min_size(egui::vec2(90.0, 28.0));
+                    if ui.add(reload).clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.add(egui::Button::new("Cancel").min_size(egui::vec2(90.0, 28.0))).clicked()
+                        || ui.input(|i| i.key_pressed(Key::Escape))
+                    {
+                        answer = Some(false);
+                    }
+                });
+            });
+        match answer {
+            Some(true) => self.reload(),
+            Some(false) => self.reload_prompt = false,
+            None => {}
         }
     }
 
@@ -1477,7 +1631,7 @@ impl App {
             ui.horizontal(|ui| {
                 let w = if can_refresh {
                     ui.available_width()
-                        - button_width(ui, "Refresh")
+                        - button_width(ui, "■  Cancel").max(button_width(ui, "Refresh"))
                         - ui.spacing().item_spacing.x
                         - 1.0
                 } else {
@@ -1501,8 +1655,14 @@ impl App {
                             set_custom = Some(true);
                         }
                     });
-                if can_refresh {
-                    let b = ui.add_enabled(!self.models_loading, egui::Button::new("Refresh"));
+                if can_refresh && self.models_loading {
+                    // The same button stops the request; its answer is then ignored.
+                    if ui.add(stop_button(ui, "Cancel")).on_hover_text("Stop getting the model list").clicked() {
+                        self.models_req += 1;
+                        self.models_loading = false;
+                    }
+                } else if can_refresh {
+                    let b = ui.add(egui::Button::new("Refresh"));
                     if b.on_hover_text("Get the current list of models from the service")
                         .clicked()
                     {
@@ -1610,21 +1770,11 @@ impl App {
     }
 
     fn options_panel(&mut self, ui: &mut egui::Ui) {
-        group(ui, "Options");
-        ui.checkbox(&mut self.add_comment, "Add model note")
-            .on_hover_text("Add a translator comment naming the model that made each translation");
-        ui.checkbox(&mut self.mark_fuzzy, "Mark as fuzzy").on_hover_text(
-            "Flag each translation as needing review. Fuzzy translations aren't used by the software until someone approves them.",
-        );
-        ui.checkbox(&mut self.dry_run, "Preview only")
-            .on_hover_text("Translate without changing any files");
-        ui.add_space(2.0);
-        let label = if self.more_options {
-            "⏶  Fewer options"
-        } else {
-            "⏷  More options"
-        };
-        if ui.add(egui::Button::new(label).frame(false)).clicked() {
+        ui.add_space(12.0);
+        // "Options" opens and closes the section.
+        let arrow = if self.more_options { "⏷" } else { "⏵" };
+        let header = egui::Button::new(group_text(&format!("{}  Options", arrow))).frame(false);
+        if ui.add(header).on_hover_text(if self.more_options { "Hide the options" } else { "Show the options" }).clicked() {
             self.more_options = !self.more_options;
         }
         if !self.more_options {
@@ -2014,9 +2164,9 @@ impl App {
                         .as_ref()
                         .map(|j| j.cancel.load(Ordering::Relaxed))
                         .unwrap_or(false);
-                    let b = egui::Button::new(if stopping { "Stopping…" } else { "Stop" })
-                        .min_size(egui::vec2(120.0, 32.0));
-                    if ui.add_enabled(!stopping, b).clicked() {
+                    let b = stop_button(ui, if stopping { "Stopping…" } else { "Stop" })
+                        .min_size(egui::vec2(160.0, 32.0));
+                    if ui.add_enabled(!stopping, b).on_hover_text("Stop translating; what's done so far is kept").clicked() {
                         if let Some(j) = &self.job {
                             j.cancel.store(true, Ordering::Relaxed);
                         }
@@ -2130,53 +2280,61 @@ impl App {
         ui.add_space(6.0);
     }
 
-    /// The Results tab: what the last run translated or rejected.
+    /// The Results tab: the translations of the last runs, waiting for the
+    /// user to accept them or mark them for review; and what was rejected.
     fn results(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         if self.log.is_empty() {
-            let translated = self
-                .job
-                .as_ref()
-                .and_then(|j| j.finished.as_ref())
-                .is_some_and(|f| f.translated > 0);
-            let text = if self.running() {
-                "Translations will appear here."
-            } else if translated {
-                "All the new translations have been reviewed."
-            } else {
-                "Nothing was translated."
-            };
+            let text = if self.running() { "Translations will appear here." } else { "Nothing is waiting for review." };
             ui.label(RichText::new(text).weak());
             return;
         }
+        // Toolbar
+        let proposals = self.log.iter().filter(|l| l.is_proposal()).count();
+        let mut bulk: Option<u8> = None; // 0 accept all, 1 mark all for review, 2 clear
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 0.0), Layout::right_to_left(Align::Center), |ui| {
+            // Right to left: Clear, then Mark all for review, then Accept all.
+            if ui
+                .add(egui::Button::new("×  Clear"))
+                .on_hover_text("Remove everything from this list without saving it")
+                .clicked()
+            {
+                bulk = Some(2);
+            }
+            let review = egui::Button::new(RichText::new("⚠  Mark all for review").color(review_ink(ui))).fill(review_fill(ui));
+            if ui
+                .add_enabled(proposals > 0, review)
+                .on_hover_text("Save all these translations to the files, marked as needing review")
+                .clicked()
+            {
+                bulk = Some(1);
+            }
+            let accept = egui::Button::new(RichText::new("✔  Accept all").color(Color32::WHITE)).fill(ACCENT);
+            if ui
+                .add_enabled(proposals > 0, accept)
+                .on_hover_text("Save all these translations to the files as reviewed")
+                .clicked()
+            {
+                bulk = Some(0);
+            }
+        });
+        ui.add_space(6.0);
         let gap = 10.0;
         let icon_w = 16.0;
         let body = TextStyle::Body.resolve(ui.style());
         let width = |t: &str, f: &egui::FontId| {
-            ui.fonts(|fo| {
-                fo.layout_no_wrap(t.into(), f.clone(), Color32::WHITE)
-                    .size()
-                    .x
-            })
+            ui.fonts(|fo| fo.layout_no_wrap(t.into(), f.clone(), Color32::WHITE).size().x)
         };
         let lang_w = self
             .log
             .iter()
             .map(|l| width(&l.lang, &body))
-            .fold(
-                width("Language", &TextStyle::Small.resolve(ui.style())),
-                f32::max,
-            )
+            .fold(width("Language", &TextStyle::Small.resolve(ui.style())), f32::max)
             .min(160.0)
             + 2.0;
         let small = egui::TextStyle::Button.resolve(ui.style());
-        let actions_w = width("✔", &small)
-            + width("Edit", &small)
-            + 2.0 * ui.spacing().button_padding.x * 2.0
-            + gap;
-        let text_w = ((ui.available_width() - icon_w - lang_w - actions_w - gap * 4.0 - 14.0)
-            / 2.0)
-            .max(120.0);
+        let actions_w = width("✔", &small) + width("Edit", &small) + 2.0 * ui.spacing().button_padding.x * 2.0 + gap;
+        let text_w = ((ui.available_width() - icon_w - lang_w - actions_w - gap * 4.0 - 14.0) / 2.0).max(120.0);
         let header = |t: &str| RichText::new(t).small().weak();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
@@ -2187,7 +2345,7 @@ impl App {
         });
         ui.separator();
         let stripe = ui.visuals().faint_bg_color;
-        let (mut approve, mut edit) = (None, None);
+        let (mut accept, mut edit) = (None, None);
         egui::ScrollArea::vertical()
             .id_salt("results")
             .stick_to_bottom(true)
@@ -2195,54 +2353,67 @@ impl App {
             .show(ui, |ui| {
                 for (i, l) in self.log.iter().enumerate() {
                     let fill = if i % 2 == 1 { stripe } else { Color32::TRANSPARENT };
-                    egui::Frame::none()
-                        .fill(fill)
-                        .inner_margin(egui::Margin::symmetric(0.0, 3.0))
-                        .show(ui, |ui| {
-                            ui.horizontal_top(|ui| {
-                                ui.spacing_mut().item_spacing.x = gap;
-                                cell(ui, icon_w, icon(l.kind));
-                                if l.lang.is_empty() {
-                                    cell(ui, lang_w + text_w * 2.0 + gap * 2.0, RichText::new(&l.a));
-                                    return;
+                    egui::Frame::none().fill(fill).inner_margin(egui::Margin::symmetric(0.0, 3.0)).show(ui, |ui| {
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            cell(ui, icon_w, icon(l.kind));
+                            if l.lang.is_empty() {
+                                cell(ui, lang_w + text_w * 2.0 + gap * 2.0, RichText::new(&l.a));
+                                return;
+                            }
+                            cell(ui, lang_w, RichText::new(&l.lang).weak());
+                            cell(ui, text_w, RichText::new(&l.a));
+                            let t = RichText::new(&l.b);
+                            ui.allocate_ui_with_layout(egui::vec2(text_w, 0.0), Layout::top_down(Align::Min), |ui| {
+                                ui.set_width(text_w);
+                                ui.add(egui::Label::new(if l.kind == LogKind::Ok { t } else { t.weak() }).wrap());
+                                if let Some(p) = &l.problem {
+                                    ui.add(egui::Label::new(RichText::new(p).small().color(RED)).wrap());
                                 }
-                                cell(ui, lang_w, RichText::new(&l.lang).weak());
-                                cell(ui, text_w, RichText::new(&l.a));
-                                let t = RichText::new(&l.b);
-                                ui.allocate_ui_with_layout(egui::vec2(text_w, 0.0), Layout::top_down(Align::Min), |ui| {
-                                    ui.set_width(text_w);
-                                    ui.add(egui::Label::new(if l.kind == LogKind::Ok { t } else { t.weak() }).wrap());
-                                    if let Some(p) = &l.problem {
-                                        ui.add(egui::Label::new(RichText::new(p).small().color(RED)).wrap());
-                                    }
-                                });
-                                let Some(r) = &l.entry else { return };
-                                ui.allocate_ui_with_layout(egui::vec2(actions_w, 0.0), Layout::right_to_left(Align::Min), |ui| {
+                            });
+                            if l.entry.is_none() {
+                                return;
+                            }
+                            ui.allocate_ui_with_layout(egui::vec2(actions_w, 0.0), Layout::right_to_left(Align::Min), |ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
-                                if ui.button("Edit").on_hover_text(format!("Open this string in the {} translations", l.lang)).clicked() {
-                                    edit = Some(r.clone());
+                                let tip = if l.is_proposal() {
+                                    format!("Save it marked as needing review, and open it in the {} translations", l.lang)
+                                } else {
+                                    format!("Open this string in the {} translations", l.lang)
+                                };
+                                if ui.button("Edit").on_hover_text(tip).clicked() {
+                                    edit = Some(i);
                                 }
-                                if l.kind == LogKind::Ok {
-                                    let b = egui::Button::new(RichText::new("✔").color(if l.approved { ui.visuals().weak_text_color() } else { GREEN }));
-                                    let tip = if l.approved { "Reviewed" } else { "Approve this translation" };
-                                    if ui.add_enabled(!l.approved, b).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
-                                        approve = Some(i);
+                                if l.is_proposal() {
+                                    let b = egui::Button::new(RichText::new("✔").color(GREEN));
+                                    if ui.add(b).on_hover_text("Accept: save this translation to the file as reviewed").clicked() {
+                                        accept = Some(i);
                                     }
                                 }
-                                });
                             });
                         });
+                    });
                 }
             });
-        if let Some(i) = approve {
-            self.approve_result(i);
+        match bulk {
+            Some(2) => self.log.clear(),
+            Some(b) => {
+                let all: Vec<usize> = (0..self.log.len()).filter(|&i| self.log[i].is_proposal()).collect();
+                self.save_proposals(&all, b == 1);
+            }
+            None => {}
         }
-        if let Some(r) = edit {
+        if let Some(i) = accept {
+            self.save_proposals(&[i], false);
+        }
+        if let Some(i) = edit {
+            let r = self.log[i].entry.clone().unwrap();
+            if self.log[i].is_proposal() {
+                // Saved for review first, so the editor shows it.
+                self.save_proposals(&[i], true);
+            }
             // No "Save changes?" question when the string is in the file already open.
-            let same_file = self
-                .editor
-                .as_ref()
-                .is_some_and(|e| e.lang == r.code && *e.path() == r.path);
+            let same_file = self.editor.as_ref().is_some_and(|e| e.lang == r.code && *e.path() == r.path);
             if same_file {
                 self.perform(Pending::EditEntry(r));
             } else {
@@ -2251,29 +2422,81 @@ impl App {
         }
     }
 
-    /// Marks a translated string as reviewed, directly in its file.
-    fn approve_result(&mut self, i: usize) {
-        let Some(r) = self.log[i].entry.clone() else {
-            return;
-        };
-        let row = &mut self.log[i];
-        match crate::po::PoFile::approve_in_file(&r.path, r.msgctxt.as_deref(), &r.msgid) {
-            // Done with it: take it off the list.
-            Ok(true) => {
-                self.log.remove(i);
+    /// Writes the proposals at `rows` to their files: as reviewed, or (if
+    /// `review`) marked as needing review with the model note. Saved rows leave
+    /// the list; the others say why they weren't saved.
+    fn save_proposals(&mut self, rows: &[usize], review: bool) {
+        let mut by_file: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
+        for &i in rows {
+            if let Some(r) = self.log.get(i).filter(|l| l.is_proposal()).and_then(|l| l.entry.as_ref()) {
+                by_file.entry(r.path.clone()).or_default().push(i);
             }
-            Ok(false) => row.problem = Some("This string is no longer in the file.".into()),
-            Err(e) => row.problem = Some(format!("Unable to save {}: {}", r.path.display(), e)),
         }
+        let mut done: BTreeSet<usize> = BTreeSet::new();
+        for (path, idx) in &by_file {
+            let items: Vec<(Option<String>, String, Vec<String>)> = idx
+                .iter()
+                .map(|&i| {
+                    let l = &self.log[i];
+                    let r = l.entry.as_ref().unwrap();
+                    (r.msgctxt.clone(), r.msgid.clone(), l.forms.clone())
+                })
+                .collect();
+            // Every row of a run has the same note.
+            let note = self.log[idx[0]].note.clone();
+            match crate::po::PoFile::write_proposals(path, &items, review, note.as_deref()) {
+                Ok(outcome) => {
+                    for (&i, w) in idx.iter().zip(outcome) {
+                        match w {
+                            crate::po::Written::Ok => {
+                                done.insert(i);
+                            }
+                            crate::po::Written::Missing => self.log[i].problem = Some("This string is no longer in the file.".into()),
+                            crate::po::Written::Taken => {
+                                self.log[i].problem = Some("It was translated and reviewed in the meantime, so it was left as it is.".into())
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    for &i in idx {
+                        self.log[i].problem = Some(format!("Unable to save {}: {}", path.display(), e));
+                    }
+                }
+            }
+        }
+        let mut i = 0;
+        self.log.retain(|_| {
+            let keep = !done.contains(&i);
+            i += 1;
+            keep
+        });
         // Refresh the counts, and an open editor that has nothing unsaved.
         let sel = self.selected.clone();
         self.scan();
         self.selected = sel;
         if let Some(ed) = &mut self.editor {
-            if !ed.dirty() && *ed.path() == r.path {
+            if !ed.dirty() && by_file.contains_key(ed.path()) {
                 let _ = ed.load();
             }
         }
+    }
+}
+
+/// Colors of "Mark all for review": a soft amber, like strings needing review.
+fn review_fill(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(78, 60, 28)
+    } else {
+        Color32::from_rgb(252, 238, 210)
+    }
+}
+
+fn review_ink(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(244, 205, 140)
+    } else {
+        Color32::from_rgb(130, 82, 10)
     }
 }
 
@@ -2386,6 +2609,19 @@ fn button_width(ui: &egui::Ui, text: &str) -> f32 {
 }
 
 /// A text field that fills the row, followed by a button anchored on the right.
+/// Dims and blocks the window behind a dialog.
+fn modal_backdrop(ctx: &egui::Context) {
+    let screen = ctx.screen_rect();
+    egui::Area::new(egui::Id::new("modal-backdrop"))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            ui.allocate_rect(screen, egui::Sense::click());
+            ui.painter()
+                .rect_filled(screen, 0.0, Color32::from_black_alpha(110));
+        });
+}
+
 fn field_with_button<R>(
     ui: &mut egui::Ui,
     label: &str,
@@ -2610,6 +2846,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.save_prompt(ctx);
+        self.reload_prompt(ctx);
         self.dev_screenshot(ctx);
         // Shrink the default window to fit small screens.
         if !self.fitted {
