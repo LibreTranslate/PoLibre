@@ -9,7 +9,7 @@ A free and open source `.po` editor for machine assisted translation with built-
 
 <img alt="PoLibre Screenshot" src="https://github.com/user-attachments/assets/b559b82d-f8a8-4f2b-be35-c4577da0a9ba" />
 
-Single binary desktop application with CLI support for scripts and workflow automations. Machine translation features are optional and the software can be used as a standalone .po editor.
+It's a desktop application, but also comes with CLI support for scripts and workflow automations. Machine translation features are optional and the software can be used as a standalone .po editor.
 
 <p><a href="../../releases"><img alt="Download" src="https://img.shields.io/badge/Download-0060B8?style=for-the-badge&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIyLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI%2BPHBhdGggZD0iTTEyIDN2MTIiLz48cGF0aCBkPSJNNyAxMGw1IDUgNS01Ii8%2BPHBhdGggZD0iTTQgMjBoMTYiLz48L3N2Zz4%3D"></a></p>
 
