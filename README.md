@@ -41,24 +41,17 @@ cargo build --release --no-default-features  # command line only
 Run `polibre` to open the app: pick a project folder and a translation service, tick the
 languages and press **Translate**. Click **Edit** on a language to review its translations.
 
-The same binary works from the command line:
+It also works from the command line:
 
 ```sh
 polibre scan path/to/project                      # languages and missing strings
 polibre translate . -l it,de -p libretranslate -k KEY --dry-run
 polibre translate . -p anthropic -m claude-opus-5-5 --limit 20
 polibre check . -l it --only-auto                 # re-check PoLibre's translations
-```
-
-Services (`-p`): `libretranslate`, `anthropic`, `google`, `openai`, `openai-compatible`
-(with `--url`), and `claude-cli`, `gemini-cli`, `codex-cli` (installed tools, no key needed).
-API keys can also come from `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY` or
-`LIBRETRANSLATE_API_KEY`. Settings are saved in `~/.config/polibre/config.json` and shared
-with the app; `--no-config` ignores them. Run `polibre --help` for all options.
-
-```sh
 polibre translate . --no-config -p anthropic -m claude-opus-5-5 --report report.json
 ```
+
+Run `polibre --help` for all options.
 
 ## License
 
