@@ -54,17 +54,20 @@ TRANSLATE OPTIONS:
         --glossary FILE     Extra glossary: CSV/TSV "source,translation" or
                             "lang,source,translation", or a .po file
         --batch-size N      Entries per request (default: 20 LLM, 25 LibreTranslate)
-        --limit N           Translate at most N entries in this run
+        --limit N           Translate at most N entries in this run (0: no limit)
         --include-fuzzy     Also re-translate entries already marked fuzzy
+                            (this run only; never read from saved settings)
         --no-fuzzy          Don't mark translations fuzzy (they won't need review)
         --no-retry          Don't re-ask the LLM about translations that fail validation
         --debug             Print every request, model reply and check to stderr [POLIBRE_DEBUG]
-        --dry-run           Translate and show results, but don't write files
+    -n, --dry-run           Translate and show results, but don't write files
         --report FILE       Write a JSON report of all translated/rejected entries
         --fail-on-reject    Exit with code 3 if any entry was rejected or failed
         --save              Save provider/model/key/url as defaults
         --no-config         Ignore saved settings (recommended in CI)
         --progress MODE     auto | bar | plain | quiet (default: auto)
+    -q, --quiet             Same as --progress quiet
+        --json              Machine-readable output (`scan` and `providers`)
     -y, --yes               Accepted for compatibility; never prompts anyway
 
 Machine translations are marked "#, fuzzy" (so they are not used until a
@@ -356,9 +359,6 @@ fn save_provider(o: &Opts, cfg: &mut Config, p: &ProviderConfig) -> Result<PathB
     if o.no_fuzzy {
         cfg.mark_fuzzy = false;
     }
-    if o.include_fuzzy {
-        cfg.include_fuzzy = true;
-    }
     cfg.save().map_err(|e| e.to_string())
 }
 
@@ -448,8 +448,7 @@ fn cmd_config(o: &Opts) -> Result<i32, String> {
         || o.url.is_some()
         || o.source_lang.is_some()
         || o.batch_size.is_some()
-        || o.no_fuzzy
-        || o.include_fuzzy;
+        || o.no_fuzzy;
     if sub == "set" || changing {
         let p = resolve_provider(o, &cfg)?;
         let path = save_provider(o, &mut cfg, &p)?;
@@ -569,7 +568,7 @@ fn prepare(o: &Opts) -> Result<Prepared, String> {
         let p = save_provider(o, &mut cfg, &provider)?;
         eprintln!("Saved settings to {}", p.display());
     }
-    let include_fuzzy = o.include_fuzzy || cfg.include_fuzzy;
+    let include_fuzzy = o.include_fuzzy;
     let root = project_path(o);
     let proj = project::scan(&root, include_fuzzy)?;
     if proj.languages.is_empty() {
@@ -642,7 +641,7 @@ fn prepare(o: &Opts) -> Result<Prepared, String> {
         include_fuzzy,
         mark_fuzzy: !o.no_fuzzy && cfg.mark_fuzzy,
         batch_size: o.batch_size.unwrap_or(cfg.batch_size),
-        limit: o.limit,
+        limit: o.limit.filter(|&l| l > 0),
         dry_run: o.dry_run,
         glossary_file: o.glossary.as_ref().map(PathBuf::from),
         context_lines: o.context_lines.unwrap_or(2),
@@ -665,7 +664,12 @@ fn cmd_check(o: &Opts) -> Result<i32, String> {
         .langs
         .as_deref()
         .filter(|l| *l != "all")
-        .map(|l| l.split(',').map(|s| langs::normalize(s.trim())).collect());
+        .map(|l| {
+            l.split([',', ' '])
+                .filter(|s| !s.is_empty())
+                .map(langs::normalize)
+                .collect()
+        });
     let (mut checked, mut bad) = (0usize, 0usize);
     let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
     for (code, l) in &proj.languages {
@@ -744,7 +748,18 @@ fn cmd_prompt(o: &Opts) -> Result<i32, String> {
         .targets
         .first()
         .ok_or("no language with untranslated entries")?;
-    let po = crate::po::PoFile::load(&t.files[0]).map_err(|e| e.to_string())?;
+    let mut po = None;
+    for f in &t.files {
+        let p2 = crate::po::PoFile::load(f).map_err(|e| e.to_string())?;
+        if p2
+            .entries()
+            .any(|e| e.needs_translation(p.settings.include_fuzzy))
+        {
+            po = Some(p2);
+            break;
+        }
+    }
+    let po = po.ok_or("nothing to translate in this language")?;
     let (n, expr) = po.plural_forms();
     println!(
         "=== SYSTEM ===\n{}",

@@ -259,6 +259,7 @@ pub enum Item {
 pub struct PoFile {
     pub items: Vec<Item>,
     pub trailing_newline: bool,
+    pub crlf: bool,
     pub wrap_width: usize,
 }
 
@@ -499,6 +500,7 @@ impl PoFile {
         PoFile {
             items,
             trailing_newline: text.ends_with('\n'),
+            crlf: text.contains("\r\n"),
             wrap_width,
         }
     }
@@ -511,15 +513,19 @@ impl PoFile {
                 Item::Entry(e) => e.render(self.wrap_width, &mut lines),
             }
         }
-        let mut s = lines.join("\n");
+        let nl = if self.crlf { "\r\n" } else { "\n" };
+        let mut s = lines.join(nl);
         if self.trailing_newline {
-            s.push('\n');
+            s.push_str(nl);
         }
         s
     }
 
-    /// Atomically write the file (temp file + rename).
+    /// Atomically write the file (temp file + rename). A symlink is
+    /// followed, so the file it points to is the one updated.
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        let real = fs::canonicalize(path);
+        let path = real.as_deref().unwrap_or(path);
         let tmp = path.with_extension("po.polibre.tmp");
         fs::write(&tmp, self.render())?;
         fs::rename(&tmp, path)
